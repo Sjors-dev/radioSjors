@@ -28,11 +28,21 @@ Just talk to me normally:
   `never play this again`            - bans whatever is on air right now
   `what's playing?`                  - now playing and what's next
 
-Commands: `!np`  `!queue`  `!skip`  `!mood <text>`  `!ban [track]`  `!banned`
-`!status`  `!help`
+Commands:
+  `!np`            what is on air right now
+  `!queue`         the next few tracks
+  `!status`        library, buffer, mood, stream health
+  `!skip`          skip the current track
+  `!mood`          show the current mood
+  `!mood <text>`   set the mood, e.g. `!mood darker and slower`
+  `!mood reset`    back to the time-of-day schedule
+  `!ban`           ban whatever is playing now
+  `!ban <track>`   ban a named track
+  `!banned`        list what is banned
+  `!help`          this
 
-`!ban` with nothing after it bans the current track. Banned audio is moved to
-`banned/`, not deleted, so it can be restored with `main.py unban`.
+`!ban` moves the audio to `banned/` rather than deleting it, so a mistake is
+undone with `main.py unban "<artist>" "<title>"`.
 """
 
 # How long to wait for the brain to handle a message before giving up on a
@@ -96,6 +106,19 @@ class RadioBot(discord.Client):
             ok = self.ls.skip()
             await message.channel.send("Skipped." if ok else
                                        "Could not reach the stream engine.")
+            return
+        if lowered in ("!mood reset", "!mood clear", "!clearmood", "!reset"):
+            # Handled here rather than sent to the classifier, which would read
+            # "reset" as a vibe and set the mood to the literal word.
+            self.db.set_state("current_mood", "")
+            await message.channel.send(
+                "Mood cleared - back to the time-of-day schedule.")
+            return
+        if lowered in ("!mood", "!vibe"):
+            current = self.db.get_state("current_mood", "")
+            await message.channel.send(
+                f"Mood: {current}" if current else
+                "Mood: following the time-of-day schedule.")
             return
         if lowered.startswith("!mood "):
             text = text[len("!mood "):].strip()

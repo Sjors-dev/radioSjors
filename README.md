@@ -110,7 +110,19 @@ it when the LLM is down:
 - `ban Runaway by Kanye West` → bans a named track
 - `what's playing?` → now playing plus what's next
 
-Commands: `!np` `!queue` `!skip` `!mood <text>` `!ban [track]` `!banned` `!status` `!help`
+| Command | Does |
+|---------|------|
+| `!np` | what is on air right now |
+| `!queue` | the next few tracks |
+| `!status` | library size, buffer, mood, stream health |
+| `!skip` | skip the current track |
+| `!mood` | show the current mood |
+| `!mood <text>` | set it, e.g. `!mood darker and slower` |
+| `!mood reset` | back to the time-of-day schedule |
+| `!ban` | ban whatever is playing now |
+| `!ban <artist> - <title>` | ban a named track |
+| `!banned` | list what is banned |
+| `!help` | the list, in chat |
 
 Banning moves the audio to `banned/` rather than deleting it, marks it in the
 database, drops it from anything already queued, skips it if it's on air, and
