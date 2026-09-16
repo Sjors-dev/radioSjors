@@ -136,21 +136,27 @@ class LiquidsoapClient:
 def parse_metadata(response: str) -> dict:
     """Pull the most recent metadata block out of an output's telnet dump.
 
-    Liquidsoap prints blocks headed '--- 1 ---', newest first, each a series of
-    key="value" lines.
+    Liquidsoap prints a history of blocks headed '--- 1 ---', '--- 2 ---', in
+    the order they went to air -- so the LAST block is what is playing now.
+    Reading the first one instead pins now-playing to whatever was on when the
+    stream started.
     """
+    blocks: list[dict] = []
     current: dict = {}
     for line in response.split("\n"):
         line = line.strip()
         if line.startswith("---"):
             if current:
-                break  # the first block is the newest one
+                blocks.append(current)
+                current = {}
             continue
         key, sep, value = line.partition("=")
         if not sep:
             continue
         current[key.strip().lower()] = value.strip().strip('"')
-    return current
+    if current:
+        blocks.append(current)
+    return blocks[-1] if blocks else {}
 
 
 def format_metadata(meta: dict) -> str:
@@ -164,11 +170,17 @@ def format_metadata(meta: dict) -> str:
     return Path(filename).stem if filename else ""
 
 
-def annotate_uri(path: str | Path, title: str = "", artist: str = "") -> str:
+def annotate_uri(path: str | Path, title: str = "", artist: str = "",
+                 no_crossfade: bool = False) -> str:
     """Build an annotate: URI so caster.fm shows sane now-playing metadata.
 
     Patter wav files carry no tags at all, so without this the stream would
     announce the filename.
+
+    `no_crossfade` sets liquidsoap's per-track crossfade overrides, which is how
+    a spoken link gets a hard cut while music keeps its blend. A two-second
+    crossfade over a ten-second patter line spends a fifth of the DJ dissolved
+    into the song.
     """
     path = str(Path(path).resolve())
     fields = []
@@ -176,6 +188,10 @@ def annotate_uri(path: str | Path, title: str = "", artist: str = "") -> str:
         fields.append(f'title="{_escape(title)}"')
     if artist:
         fields.append(f'artist="{_escape(artist)}"')
+    if no_crossfade:
+        fields.append('liq_cross_duration="0."')
+        fields.append('liq_fade_in="0."')
+        fields.append('liq_fade_out="0."')
     if not fields:
         return path
     return f"annotate:{','.join(fields)}:{path}"

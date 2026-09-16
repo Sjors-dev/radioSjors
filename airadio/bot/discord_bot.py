@@ -36,8 +36,10 @@ Commands: `!np`  `!queue`  `!skip`  `!mood <text>`  `!ban [track]`  `!banned`
 """
 
 # How long to wait for the brain to handle a message before giving up on a
-# reply.  Downloads are the slow case.
-REPLY_TIMEOUT = 180.0
+# reply. The brain is single threaded, so a request can queue behind a
+# whole block of patter renders, which on a slow CPU with a high-quality
+# voice is several minutes. The request is never lost, only the reply.
+REPLY_TIMEOUT = 420.0
 
 
 class RadioBot(discord.Client):

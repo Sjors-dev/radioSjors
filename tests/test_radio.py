@@ -253,15 +253,37 @@ class TestLLMFailover(unittest.TestCase):
 
 
 class TestMetadataParsing(unittest.TestCase):
-    def test_parses_newest_block(self):
-        response = ('--- 1 ---\nartist="Khruangbin"\ntitle="August 10"\n'
-                    '--- 2 ---\nartist="Old"\ntitle="Older"')
+    def test_parses_the_newest_block_which_is_the_last(self):
+        # Liquidsoap prints metadata in the order it went to air, so block 1 is
+        # the OLDEST. Reading the first block pinned now-playing to whatever
+        # was on when the stream started, and it never moved again.
+        response = ('--- 1 ---\nartist="Old"\ntitle="Older"\n'
+                    '--- 2 ---\nartist="Khruangbin"\ntitle="August 10"')
         self.assertEqual(format_metadata(parse_metadata(response)),
                          "Khruangbin - August 10")
+
+    def test_single_block(self):
+        response = '--- 1 ---\nartist="Gunna"\ntitle="fukumean"'
+        self.assertEqual(format_metadata(parse_metadata(response)),
+                         "Gunna - fukumean")
+
+    def test_no_metadata_yet(self):
+        self.assertEqual(format_metadata(parse_metadata("")), "")
 
     def test_falls_back_to_filename(self):
         meta = parse_metadata('--- 1 ---\nfilename="/music/Foo - Bar.mp3"')
         self.assertEqual(format_metadata(meta), "Foo - Bar")
+
+    def test_patter_gets_a_hard_cut(self):
+        uri = annotate_uri("/queue/p.wav", title="Station ID", artist="Radio",
+                           no_crossfade=True)
+        self.assertIn('liq_cross_duration="0."', uri)
+        self.assertIn('liq_fade_in="0."', uri)
+        self.assertIn('liq_fade_out="0."', uri)
+
+    def test_music_keeps_its_crossfade(self):
+        uri = annotate_uri("/music/x.mp3", title="T", artist="A")
+        self.assertNotIn("liq_cross", uri)
 
     def test_annotate_uri_escapes_quotes_and_colons(self):
         uri = annotate_uri("/music/x.mp3", title='He said "hi": ok', artist="A")

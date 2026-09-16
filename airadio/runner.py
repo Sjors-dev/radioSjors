@@ -61,6 +61,9 @@ class Runner:
         self._last_housekeeping = 0.0
         self._last_connected: bool | None = None
         self._last_now_playing = ""
+        # Per queue: was the item we pushed last a patter line? Used to
+        # kill the crossfade on both sides of a spoken link.
+        self._last_push_was_patter: dict[str, bool] = {}
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -162,13 +165,22 @@ class Runner:
     def _push(self, queue_id: str, item: dict) -> None:
         title = item.get("title") or ""
         artist = item.get("artist") or ""
-        if item.get("kind") == "patter":
+        is_patter = item.get("kind") == "patter"
+        if is_patter:
             title = "Station ID"
-        uri = annotate_uri(item["path"], title=title, artist=artist)
+
+        # Hard-cut into a patter line, and out of it into the next track.
+        # A crossfade dissolves the DJ into the music at both ends, which over
+        # a ten-second link is most of the link.
+        hard_cut = is_patter or self._last_push_was_patter.get(queue_id, False)
+
+        uri = annotate_uri(item["path"], title=title, artist=artist,
+                           no_crossfade=hard_cut)
         if self.ls.push(queue_id, uri):
+            self._last_push_was_patter[queue_id] = is_patter
             log.info("-> %s: %s%s", queue_id,
                      f"{artist} - {title}" if title else Path(item["path"]).name,
-                     "" if item.get("kind") == "song" else "  [patter]")
+                     "  [patter]" if is_patter else "")
         else:
             # Put it back so it is not silently lost.
             self.db.execute("UPDATE queue_items SET status='ready' WHERE id=?",
