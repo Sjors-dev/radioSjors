@@ -106,6 +106,7 @@ it when the LLM is down:
 - `play bohemian rhapsody by queen` → queued as a request; downloaded first if
   it isn't in the library
 - `make it darker and slower` → updates the station mood and re-plans
+- `skip this song please` / `next song` → skips the current track (does **not** ban it)
 - `never play this again` / `delete this song` → bans whatever is on air
 - `ban Runaway by Kanye West` → bans a named track
 - `what's playing?` → now playing plus what's next
