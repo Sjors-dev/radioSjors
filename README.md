@@ -65,7 +65,7 @@ Kill the brain and the music keeps playing. That is the point, and
 |------|-----|
 | `airadio/config.py` | `config.yaml` for behaviour, `.env` for secrets, `config.local.yaml` for machine overrides |
 | `airadio/db.py` | SQLite schema and access. WAL mode — three processes share it |
-| `airadio/library.py` | Scan the music folder, read/write tags, de-duplicate by tags *and* by content hash |
+| `airadio/library.py` | Scan the music folder, read/write tags, de-duplicate by tags *and* by content hash, ban/unban |
 | `airadio/discovery.py` | Last.fm client: real similar artists and tracks, plus reference durations |
 | `airadio/downloader.py` | yt-dlp wrapper and the quality filters that make it usable |
 | `airadio/tts.py` | Piper (or espeak) renderer, loudness-matched to the music |
@@ -91,6 +91,8 @@ Kill the brain and the music keeps playing. That is the point, and
 .venv/bin/python main.py download "Artist" "Title"
 .venv/bin/python main.py tts-test "line to speak"
 .venv/bin/python main.py mood "darker and slower"
+.venv/bin/python main.py banned           # what's blacklisted
+.venv/bin/python main.py unban "Artist" "Title"
 .venv/bin/python main.py log              # what got downloaded, what got rejected and why
 .venv/bin/python main.py run              # the brain loop (normally systemd's job)
 .venv/bin/python main.py bot              # the Discord bot (normally systemd's job)
@@ -104,9 +106,17 @@ it when the LLM is down:
 - `play bohemian rhapsody by queen` → queued as a request; downloaded first if
   it isn't in the library
 - `make it darker and slower` → updates the station mood and re-plans
+- `never play this again` / `delete this song` → bans whatever is on air
+- `ban Runaway by Kanye West` → bans a named track
 - `what's playing?` → now playing plus what's next
 
-Commands: `!np` `!queue` `!skip` `!mood <text>` `!status` `!help`
+Commands: `!np` `!queue` `!skip` `!mood <text>` `!ban [track]` `!banned` `!status` `!help`
+
+Banning moves the audio to `banned/` rather than deleting it, marks it in the
+database, drops it from anything already queued, skips it if it's on air, and
+stops the downloader ever fetching it again. The file has to leave `library/`
+because the safety playlist reads that folder directly. Reversible with
+`main.py unban "<artist>" "<title>"`.
 
 ---
 

@@ -50,7 +50,7 @@ class App:
 
 
 def cmd_init(args, cfg: Config) -> int:
-    for key in ("library", "queue", "state", "logs"):
+    for key in ("library", "banned", "queue", "state", "logs"):
         path = cfg.path(key)
         print(f"  {key:<8} {path}")
     App(cfg)
@@ -257,6 +257,36 @@ def cmd_status(args, cfg: Config) -> int:
     return 0
 
 
+def cmd_banned(args, cfg: Config) -> int:
+    app = App(cfg)
+    rows = app.db.query("SELECT * FROM banned ORDER BY created_at DESC")
+    if not rows:
+        print("nothing is banned")
+        return 0
+    for row in rows:
+        stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(row["created_at"]))
+        location = row["file_path"] or "(file was already gone)"
+        print(f"{stamp}  {row['artist']} - {row['title']}")
+        print(f"                  key: {row['dedupe_key']}")
+        print(f"                  {location}")
+    print(f"\n{len(rows)} banned. Restore one with: "
+          f"main.py unban \"<artist>\" \"<title>\"")
+    return 0
+
+
+def cmd_unban(args, cfg: Config) -> int:
+    from .util import dedupe_key
+
+    app = App(cfg)
+    key = dedupe_key(args.artist, args.title)
+    if not app.library.unban(key, library_dir=cfg.path("library")):
+        print(f"not banned: {args.artist} - {args.title}", file=sys.stderr)
+        return 1
+    app.library.scan()
+    print(f"restored {args.artist} - {args.title}")
+    return 0
+
+
 def cmd_log(args, cfg: Config) -> int:
     app = App(cfg)
     rows = app.db.query(
@@ -285,7 +315,7 @@ def cmd_doctor(args, cfg: Config) -> int:
         print(f"{line}\n         {detail}" if detail else line)
 
     print("=== paths ===")
-    for key in ("library", "queue", "state", "logs"):
+    for key in ("library", "banned", "queue", "state", "logs"):
         path = cfg.path(key)
         writable = os.access(path, os.W_OK)
         report("OK" if writable else "FAIL", f"{key} dir", str(path))
@@ -410,6 +440,12 @@ def build_parser() -> argparse.ArgumentParser:
     mood.add_argument("text", nargs="*")
     mood.add_argument("--clear", action="store_true")
 
+    sub.add_parser("banned", help="list banned tracks")
+
+    unban = sub.add_parser("unban", help="restore a banned track")
+    unban.add_argument("artist")
+    unban.add_argument("title")
+
     logs = sub.add_parser("log", help="recent download decisions")
     logs.add_argument("--count", type=int, default=20)
 
@@ -428,6 +464,8 @@ COMMANDS = {
     "tts-test": cmd_tts_test,
     "mood": cmd_mood,
     "status": cmd_status,
+    "banned": cmd_banned,
+    "unban": cmd_unban,
     "log": cmd_log,
     "doctor": cmd_doctor,
 }

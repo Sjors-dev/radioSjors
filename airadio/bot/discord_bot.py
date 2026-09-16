@@ -25,9 +25,14 @@ HELP = """\
 Just talk to me normally:
   `play bohemian rhapsody by queen`  - queues a specific track (downloads it if needed)
   `make it darker and slower`        - shifts the station's mood
+  `never play this again`            - bans whatever is on air right now
   `what's playing?`                  - now playing and what's next
 
-Commands: `!np`  `!queue`  `!skip`  `!mood <text>`  `!status`  `!help`
+Commands: `!np`  `!queue`  `!skip`  `!mood <text>`  `!ban [track]`  `!banned`
+`!status`  `!help`
+
+`!ban` with nothing after it bans the current track. Banned audio is moved to
+`banned/`, not deleted, so it can be restored with `main.py unban`.
 """
 
 # How long to wait for the brain to handle a message before giving up on a
@@ -78,6 +83,9 @@ class RadioBot(discord.Client):
             return
         if lowered in ("!queue", "!next"):
             await message.channel.send(self._queue_preview())
+            return
+        if lowered in ("!banned", "!bans"):
+            await message.channel.send(self._banned_list())
             return
         if lowered == "!status":
             await message.channel.send(self._status())
@@ -146,6 +154,16 @@ class RadioBot(discord.Client):
             marker = "*" if item["tier"] == "request" else " "
             lines.append(f"{marker} {item['artist']} - {item['title']}")
         return "Coming up:\n```\n" + "\n".join(lines) + "\n```"
+
+    def _banned_list(self) -> str:
+        rows = self.db.query(
+            "SELECT artist, title FROM banned ORDER BY created_at DESC LIMIT 15")
+        if not rows:
+            return "Nothing is banned."
+        lines = [f"{row['artist']} - {row['title']}" for row in rows]
+        total = self.db.one("SELECT COUNT(*) AS n FROM banned")
+        header = f"Banned ({total['n'] if total else len(lines)}):"
+        return header + "\n```\n" + "\n".join(lines) + "\n```"
 
     def _status(self) -> str:
         queue = QueueManager(self.cfg, self.db)

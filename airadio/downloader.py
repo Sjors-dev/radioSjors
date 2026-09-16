@@ -190,6 +190,10 @@ class Downloader:
         if not artist or not title:
             return DownloadResult(False, reason="missing artist or title")
 
+        if self.library.is_banned(artist, title):
+            log.info("refusing to download banned track: %s - %s", artist, title)
+            return DownloadResult(False, reason="that one is banned from the station")
+
         existing = self.library.has_track(artist, title)
         if existing:
             return DownloadResult(True, existing, "already in library")
@@ -350,6 +354,8 @@ class Downloader:
         for track in self.lastfm.expand(seeds, want=wanted):
             key = dedupe_key(track["artist"], track["title"])
             if self.db.one("SELECT 1 FROM tracks WHERE dedupe_key=? AND missing=0", (key,)):
+                continue
+            if self.db.one("SELECT 1 FROM banned WHERE dedupe_key=?", (key,)):
                 continue
             if self.db.one("SELECT 1 FROM candidates WHERE dedupe_key=?", (key,)):
                 continue

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import time
 from pathlib import Path
 
@@ -125,9 +126,12 @@ class Library:
             # skip reading tags and hashing. Keeps a periodic rescan of a
             # thousand-track library off a spinning disk essentially free.
             known = self.db.one(
-                "SELECT id, dedupe_key, content_hash FROM tracks WHERE path = ?",
-                (rel,))
-            if known and known["content_hash"]:
+                "SELECT id, dedupe_key, content_hash, missing FROM tracks "
+                "WHERE path = ?", (rel,))
+            # A row marked missing must take the slow path: the file has come
+            # back (restored from banned/, a remount, moved by hand) and the
+            # row needs clearing, not skipping.
+            if known and known["content_hash"] and not known["missing"]:
                 try:
                     same_size = known["content_hash"].startswith(
                         f"{path.stat().st_size}-")
@@ -142,6 +146,11 @@ class Library:
             info = self.read_tags(path)
             key = dedupe_key(info["artist"], info["title"])
             digest = quick_hash(path)
+
+            if self.db.one("SELECT 1 FROM banned WHERE dedupe_key=?", (key,)):
+                log.info("banned track found in the library, skipping: %s", path.name)
+                skipped += 1
+                continue
 
             # Two ways of being a duplicate: same artist+title after
             # normalisation, or byte-identical (a re-download under a slightly
@@ -233,6 +242,77 @@ class Library:
                 best, best_score = row, score
         # Require most of the query's words to be present before claiming a hit.
         return dict(best) if best is not None and best_score >= 0.8 else None
+
+    # -- banning ------------------------------------------------------------
+
+    def is_banned(self, artist: str, title: str) -> bool:
+        key = dedupe_key(artist, title)
+        return self.db.one("SELECT 1 FROM banned WHERE dedupe_key=?", (key,)) is not None
+
+    def ban(self, track: dict, reason: str = "", banned_dir: Path | None = None) -> str:
+        """Take a track off the station permanently.
+
+        The audio is *moved*, not deleted: liquidsoap's safety playlist reads
+        the library folder directly, so a database-only ban would still get
+        played by tier 3.  Moving it out is what actually removes it, and
+        keeping the file means a mistaken ban is reversible.
+        """
+        key = dedupe_key(track["artist"], track["title"])
+        source = Path(track["path"])
+        destination = ""
+
+        if banned_dir is not None and source.exists():
+            banned_dir.mkdir(parents=True, exist_ok=True)
+            target = banned_dir / source.name
+            counter = 1
+            while target.exists():
+                target = banned_dir / f"{source.stem} ({counter}){source.suffix}"
+                counter += 1
+            try:
+                shutil.move(str(source), str(target))
+                destination = str(target)
+            except Exception as exc:
+                log.error("could not move banned file %s: %s", source, exc)
+
+        self.db.execute(
+            "INSERT INTO banned(dedupe_key, artist, title, reason, file_path, "
+            "created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(dedupe_key) DO UPDATE SET "
+            "reason=excluded.reason, file_path=excluded.file_path",
+            (key, track["artist"], track["title"], reason, destination, time.time()),
+        )
+        # missing=1 takes it out of every planner query and the library count.
+        self.db.execute("UPDATE tracks SET missing=1 WHERE dedupe_key=?", (key,))
+        # Don't let the discovery loop fetch it again.
+        self.db.execute(
+            "INSERT INTO candidates(dedupe_key, artist, title, source, status, "
+            "note, created_at) VALUES(?,?,?,?,?,?,?) "
+            "ON CONFLICT(dedupe_key) DO UPDATE SET status='rejected', note='banned'",
+            (key, track["artist"], track["title"], "ban", "rejected", "banned",
+             time.time()),
+        )
+        log.info("banned: %s - %s%s", track["artist"], track["title"],
+                 f" (moved to {destination})" if destination else " (file already gone)")
+        return destination
+
+    def unban(self, dedupe_key_value: str, library_dir: Path | None = None) -> bool:
+        """Undo a ban, moving the audio back if it is still there."""
+        row = self.db.one("SELECT * FROM banned WHERE dedupe_key=?", (dedupe_key_value,))
+        if row is None:
+            return False
+
+        stored = Path(row["file_path"]) if row["file_path"] else None
+        if stored and stored.exists() and library_dir is not None:
+            try:
+                shutil.move(str(stored), str(Path(library_dir) / stored.name))
+            except Exception as exc:
+                log.error("could not restore %s: %s", stored, exc)
+                return False
+
+        self.db.execute("DELETE FROM banned WHERE dedupe_key=?", (dedupe_key_value,))
+        self.db.execute("DELETE FROM candidates WHERE dedupe_key=? AND source='ban'",
+                        (dedupe_key_value,))
+        log.info("unbanned: %s - %s", row["artist"], row["title"])
+        return True
 
     def mark_played(self, track_id: int) -> None:
         self.db.execute(

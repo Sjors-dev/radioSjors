@@ -419,6 +419,84 @@ class TestLibrary(RadioTestCase):
 # -- planner ----------------------------------------------------------------
 
 
+class TestBanning(RadioTestCase):
+    """Banning must actually remove the track from every tier, including the
+    safety playlist, which reads the library folder rather than the database."""
+
+    def setUp(self):
+        super().setUp()
+        self.seed_library(artists=4, per_artist=3)
+        self.downloader = Downloader(self.cfg, self.db, self.library, LastFM(""))
+        self.track = dict(self.db.one("SELECT * FROM tracks LIMIT 1"))
+
+    def ban(self):
+        return self.library.ban(self.track, reason="test",
+                                banned_dir=self.cfg.path("banned"))
+
+    def test_file_leaves_the_library_folder(self):
+        original = Path(self.track["path"])
+        moved = self.ban()
+        self.assertFalse(original.exists(), "banned file is still in library/")
+        self.assertTrue(Path(moved).exists(), "banned file was lost, not moved")
+        self.assertEqual(Path(moved).parent, self.cfg.path("banned"))
+
+    def test_track_is_no_longer_schedulable(self):
+        self.ban()
+        planner = Planner(self.cfg, self.db, self.library, LLM(self.cfg))
+        ids = [t["id"] for t in planner.select_candidates([1, 5], 50)]
+        self.assertNotIn(self.track["id"], ids)
+
+    def test_library_count_drops(self):
+        before = self.library.count()
+        self.ban()
+        self.assertEqual(self.library.count(), before - 1)
+
+    def test_is_banned_matches_spelling_variants(self):
+        self.ban()
+        self.assertTrue(self.library.is_banned(
+            self.track["artist"], self.track["title"] + " (Official Video)"))
+
+    def test_download_refuses_a_banned_track(self):
+        self.ban()
+        result = self.downloader.fetch(self.track["artist"], self.track["title"])
+        self.assertFalse(result.ok)
+        self.assertIn("banned", result.reason)
+
+    def test_scan_does_not_readopt_a_banned_file(self):
+        moved = self.ban()
+        # Simulate the file being put back into the library by hand.
+        shutil.copyfile(moved, self.cfg.path("library") / Path(moved).name)
+        self.library.scan()
+        self.assertFalse(self.library.has_track(
+            self.track["artist"], self.track["title"]))
+
+    def test_unban_restores_the_file_and_the_track(self):
+        self.ban()
+        key = dedupe_key(self.track["artist"], self.track["title"])
+        self.assertTrue(self.library.unban(key, library_dir=self.cfg.path("library")))
+        self.library.scan()
+        self.assertIsNotNone(self.library.has_track(
+            self.track["artist"], self.track["title"]))
+
+    def test_unban_of_something_not_banned_is_a_no_op(self):
+        self.assertFalse(self.library.unban("nope|nothing"))
+
+    def test_banning_twice_does_not_error(self):
+        self.ban()
+        self.ban()
+        row = self.db.one("SELECT COUNT(*) AS n FROM banned")
+        self.assertEqual(row["n"], 1)
+
+    def test_same_track_recognises_the_on_air_string(self):
+        from airadio.runner import _same_track
+
+        track = {"artist": "Kanye West", "title": "Runaway"}
+        self.assertTrue(_same_track("Kanye West - Runaway", track))
+        self.assertTrue(_same_track("kanye west - Runaway (Official Audio)", track))
+        self.assertFalse(_same_track("Kanye West - Power", track))
+        self.assertFalse(_same_track("", track))
+
+
 class TestFallbackPlanner(RadioTestCase):
     def setUp(self):
         super().setUp()

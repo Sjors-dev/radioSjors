@@ -82,14 +82,23 @@ listener. Decide what the listener wants.
 Categories:
 - "track"    : they want a specific song played. Extract artist and title.
 - "vibe"     : they want the overall mood or direction of the station changed.
+- "ban"      : they want a song removed, never played again, blacklisted,
+               deleted, or they are saying they hate this track. Extract artist
+               and title if they named one; leave both empty if they mean the
+               track playing right now ("delete this", "never play this again").
 - "question" : they are asking about what is playing or what is queued.
 - "chat"     : anything else, including greetings and comments.
 
 Return ONLY JSON:
 {"kind": "track", "artist": "Queen", "title": "Bohemian Rhapsody", "reply": "short friendly confirmation"}
 {"kind": "vibe", "mood": "darker and slower, more late-night", "reply": "short confirmation"}
+{"kind": "ban", "artist": "", "title": "", "reply": "short confirmation"}
 {"kind": "question", "reply": ""}
 {"kind": "chat", "reply": "short friendly answer in one sentence"}
+
+Be careful to tell "track" and "ban" apart: "play X" is a track request, \
+"never play X again" is a ban. When in doubt between the two, choose "track" -- \
+a wrongly queued song is a much smaller mistake than a wrongly banned one.
 
 For "vibe", write the mood field as a short instruction a music programmer \
 could follow. For "track", give artist and title separately; if the listener \

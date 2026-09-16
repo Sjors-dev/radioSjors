@@ -98,6 +98,17 @@ CREATE TABLE IF NOT EXISTS candidates (
 );
 CREATE INDEX IF NOT EXISTS idx_candidates_status ON candidates(status);
 
+-- Tracks the listener has banned from the station. Keyed by the normalised
+-- artist+title so a re-download under a different filename is still caught.
+CREATE TABLE IF NOT EXISTS banned (
+    dedupe_key TEXT PRIMARY KEY,
+    artist     TEXT,
+    title      TEXT,
+    reason     TEXT,
+    file_path  TEXT,                        -- where the audio was moved to
+    created_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS download_log (
     id          INTEGER PRIMARY KEY,
     artist      TEXT,

@@ -4,7 +4,8 @@
 # ===========================================================================
 
 paths:
-  library: library          # music files (mp3)
+  library: library          # music files (mp3) -- liquidsoap reads this
+  banned: banned            # banned tracks are MOVED here, not deleted
   queue: queue              # rendered patter audio
   state: state              # sqlite db + now_playing.txt
   logs: logs
@@ -95,8 +96,12 @@ planner:
 llm:
   # Failover order. First provider that answers wins; 429/5xx falls through.
   providers: [gemini, groq]
-  gemini_model: gemini-2.5-flash
-  groq_model: llama-3.3-70b-versatile
+  # Both providers retire models regularly. If you get a 404, list what your
+  # key can actually reach:
+  #   curl -s "https://generativelanguage.googleapis.com/v1beta/models?key=$KEY"
+  #   curl -s https://api.groq.com/openai/v1/models -H "Authorization: Bearer $KEY"
+  gemini_model: gemini-3.6-flash
+  groq_model: openai/gpt-oss-120b
   timeout_seconds: 60
   max_retries: 2
   # Completion token budgets per job.

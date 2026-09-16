@@ -24,7 +24,7 @@ from .library import Library
 from .liquidsoap import AI_QUEUE, REQUEST_QUEUE, LiquidsoapClient, annotate_uri
 from .queueing import QueueManager
 from .tts import TTS
-from .util import human_duration
+from .util import human_duration, normalize
 from .brain.intent import classify
 from .brain.llm import LLM
 from .brain.planner import Planner
@@ -213,9 +213,55 @@ class Runner:
             return self._handle_track_request(intent)
         if kind == "vibe":
             return self._handle_vibe_request(intent)
+        if kind == "ban":
+            return self._handle_ban_request(intent)
         if kind == "question":
             return self.status_line()
         return intent.get("reply") or "Got it."
+
+    def _handle_ban_request(self, intent: dict) -> str:
+        """Take a track off the station for good."""
+        artist = intent.get("artist", "")
+        title = intent.get("title", "")
+        named = bool(artist or title)
+
+        track = None
+        if named:
+            if artist and title:
+                track = self.library.has_track(artist, title)
+            if track is None:
+                track = self.library.find(f"{artist} {title}".strip())
+            if track is None:
+                return (f"Could not find {(artist + ' ' + title).strip()!r} in the "
+                        "library, so there is nothing to ban.")
+        else:
+            # "delete this" means whatever is on air right now.
+            current = read_now_playing(self.cfg)
+            if not current:
+                return ("I do not know what is playing right now, so I cannot ban "
+                        "it. Name the track and I will.")
+            track = self.library.find(current)
+            if track is None:
+                return f"Could not match {current!r} to a track in the library."
+
+        was_on_air = _same_track(read_now_playing(self.cfg), track)
+
+        self.library.ban(track, reason="banned from chat",
+                         banned_dir=self.cfg.path("banned"))
+
+        # Pull it out of anything already planned but not yet played.
+        dropped = self.db.execute(
+            "DELETE FROM queue_items WHERE status='ready' AND track_id=?",
+            (track["id"],))
+
+        if was_on_air:
+            self.ls.skip()
+
+        log.info("banned %s - %s (dropped %d queued, on air: %s)",
+                 track["artist"], track["title"], dropped, was_on_air)
+        return (f"Banned {track['artist']} - {track['title']}. "
+                f"{'Skipping it now. ' if was_on_air else ''}"
+                "It will not be played or re-downloaded again.")
 
     def _handle_track_request(self, intent: dict) -> str:
         artist = intent.get("artist", "")
@@ -317,6 +363,17 @@ class Runner:
             parts.append("Next: " + "; ".join(nxt[:3]))
         parts.append(f"Buffer: {human_duration(self.queue.ready_seconds())}")
         return " | ".join(parts)
+
+
+def _same_track(now_playing: str, track: dict) -> bool:
+    """Is this on-air string the same track? Metadata spelling varies, so match
+    on the normalised title and artist rather than on an exact string."""
+    if not now_playing:
+        return False
+    haystack = normalize(now_playing)
+    title = normalize(track.get("title", ""))
+    artist = normalize(track.get("artist", ""))
+    return bool(title) and title in haystack and (not artist or artist in haystack)
 
 
 def read_now_playing(cfg: Config) -> str:

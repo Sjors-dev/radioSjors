@@ -19,6 +19,20 @@ _PLAY = re.compile(
     r"^\s*(?:!?play|put on|queue|speel|draai)\s+(.+?)\s*$", re.IGNORECASE)
 _BY = re.compile(r"^(.*?)\s+(?:by|van|-|–)\s+(.+)$", re.IGNORECASE)
 
+# Banning is destructive, so the rule-based matcher is deliberately strict:
+# it only fires on phrasings that cannot reasonably mean anything else.
+_BAN = re.compile(
+    r"^\s*(?:!ban|ban|delete|remove|blacklist|verwijder|nooit meer)\b\s*(.*)$",
+    re.IGNORECASE)
+_BAN_PHRASE = re.compile(
+    r"\b(?:never play (?:this|that|it)(?: again)?"
+    r"|don'?t play (?:this|that|it) again"
+    r"|nooit meer (?:spelen|draaien))\b",
+    re.IGNORECASE)
+_THIS_TRACK = re.compile(
+    r"^(?:this|that|it|this one|this song|this track|current|deze|dit)?\s*"
+    r"(?:song|track|nummer)?\s*$", re.IGNORECASE)
+
 _VIBE_WORDS = (
     "make it", "something", "i want", "mood", "vibe", "darker", "lighter",
     "upbeat", "chill", "chiller", "calmer", "heavier", "softer", "faster",
@@ -57,7 +71,7 @@ def classify(llm: LLM, text: str) -> dict:
 
 def _normalize(data: dict) -> dict | None:
     kind = str(data.get("kind") or "").strip().lower()
-    if kind not in ("track", "vibe", "question", "chat"):
+    if kind not in ("track", "vibe", "ban", "question", "chat"):
         return None
     return {
         "kind": kind,
@@ -70,6 +84,11 @@ def _normalize(data: dict) -> dict | None:
 
 def _rules(text: str) -> dict:
     lowered = text.lower()
+
+    # Ban is checked before play: "never play this again" contains "play".
+    ban = _ban_from_rules(text)
+    if ban is not None:
+        return ban
 
     match = _PLAY.match(text)
     if match:
@@ -91,3 +110,36 @@ def _rules(text: str) -> dict:
                 "reply": "Noted, shifting the mood."}
 
     return {"kind": "chat", "artist": "", "title": "", "mood": "", "reply": ""}
+
+
+def _ban_from_rules(text: str) -> dict | None:
+    """Strict rule-based ban detection. Returns None if it is not clearly a ban.
+
+    Banning removes a track from the station, so this errs heavily towards not
+    matching. Anything ambiguous falls through to the other rules.
+    """
+    target = None
+
+    phrase = _BAN_PHRASE.search(text)
+    if phrase:
+        target = ""  # "never play this again" -> whatever is on air now
+
+    match = _BAN.match(text)
+    if match:
+        remainder = match.group(1).strip().strip('"')
+        if _THIS_TRACK.match(remainder):
+            target = ""
+        else:
+            target = remainder
+
+    if target is None:
+        return None
+
+    artist, title = "", target
+    if target:
+        by_match = _BY.match(target)
+        if by_match:
+            title, artist = by_match.group(1).strip(), by_match.group(2).strip()
+
+    return {"kind": "ban", "artist": artist, "title": title, "mood": "",
+            "reply": "Taking it off the station."}
