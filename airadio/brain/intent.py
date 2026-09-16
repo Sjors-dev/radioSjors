@@ -29,6 +29,14 @@ _BAN_PHRASE = re.compile(
     r"|don'?t play (?:this|that|it) again"
     r"|nooit meer (?:spelen|draaien))\b",
     re.IGNORECASE)
+# Anchored at the start so "what's next?" stays a question.
+_SKIP = re.compile(
+    r"^\s*(?:!?skip|next(?:\s+song|\s+track)?|volgende|door)\b",
+    re.IGNORECASE)
+_SKIP_PHRASE = re.compile(
+    r"\b(?:skip (?:this|that|it)|move on|not this one|next one please)\b",
+    re.IGNORECASE)
+
 _THIS_TRACK = re.compile(
     r"^(?:this|that|it|this one|this song|this track|current|deze|dit)?\s*"
     r"(?:song|track|nummer)?\s*$", re.IGNORECASE)
@@ -71,7 +79,7 @@ def classify(llm: LLM, text: str) -> dict:
 
 def _normalize(data: dict) -> dict | None:
     kind = str(data.get("kind") or "").strip().lower()
-    if kind not in ("track", "vibe", "ban", "question", "chat"):
+    if kind not in ("track", "vibe", "skip", "ban", "question", "chat"):
         return None
     return {
         "kind": kind,
@@ -89,6 +97,12 @@ def _rules(text: str) -> dict:
     ban = _ban_from_rules(text)
     if ban is not None:
         return ban
+
+    # Skip before play: "skip to the next song" contains neither, but
+    # "next song" should not be read as a request for a track called "song".
+    if _SKIP.match(text) or _SKIP_PHRASE.search(text):
+        return {"kind": "skip", "artist": "", "title": "", "mood": "",
+                "reply": "Skipping."}
 
     match = _PLAY.match(text)
     if match:

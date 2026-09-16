@@ -246,11 +246,21 @@ class Runner:
             return self._handle_track_request(intent)
         if kind == "vibe":
             return self._handle_vibe_request(intent)
+        if kind == "skip":
+            return self._handle_skip_request()
         if kind == "ban":
             return self._handle_ban_request(intent)
         if kind == "question":
             return self.status_line()
         return intent.get("reply") or "Got it."
+
+    def _handle_skip_request(self) -> str:
+        """Move on. Deliberately separate from banning: skipping is harmless."""
+        current = read_now_playing(self.cfg)
+        if not self.ls.skip():
+            return "Could not reach the stream engine to skip."
+        log.info("skipped on request: %s", current or "unknown")
+        return f"Skipped {current}." if current else "Skipped."
 
     def _handle_ban_request(self, intent: dict) -> str:
         """Take a track off the station for good."""

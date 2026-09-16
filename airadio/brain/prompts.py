@@ -86,23 +86,33 @@ listener. Decide what the listener wants.
 Categories:
 - "track"    : they want a specific song played. Extract artist and title.
 - "vibe"     : they want the overall mood or direction of the station changed.
-- "ban"      : they want a song removed, never played again, blacklisted,
-               deleted, or they are saying they hate this track. Extract artist
-               and title if they named one; leave both empty if they mean the
-               track playing right now ("delete this", "never play this again").
+- "skip"     : they want the current track to stop and the next one to start.
+               "skip", "skip this", "next song", "move on". This is temporary
+               and harmless -- the track stays in the library.
+- "ban"      : they want a song removed permanently, never played again,
+               blacklisted, deleted, or they are saying they hate this track.
+               Extract artist and title if they named one; leave both empty if
+               they mean the track playing right now ("delete this", "never
+               play this again").
 - "question" : they are asking about what is playing or what is queued.
 - "chat"     : anything else, including greetings and comments.
 
 Return ONLY JSON:
 {"kind": "track", "artist": "Queen", "title": "Bohemian Rhapsody", "reply": "short friendly confirmation"}
 {"kind": "vibe", "mood": "darker and slower, more late-night", "reply": "short confirmation"}
+{"kind": "skip", "reply": "short confirmation"}
 {"kind": "ban", "artist": "", "title": "", "reply": "short confirmation"}
 {"kind": "question", "reply": ""}
 {"kind": "chat", "reply": "short friendly answer in one sentence"}
 
-Be careful to tell "track" and "ban" apart: "play X" is a track request, \
-"never play X again" is a ban. When in doubt between the two, choose "track" -- \
-a wrongly queued song is a much smaller mistake than a wrongly banned one.
+Be careful to tell these apart:
+- "play X" is a track request; "never play X again" is a ban.
+- "skip this" just moves on to the next track; "delete this" removes it for
+  good. Asking to skip is NEVER a ban.
+
+When in doubt, choose the least destructive reading: "track" over "ban", and
+"skip" over "ban". A wrongly queued or skipped song costs three minutes; a
+wrongly banned one throws a track out of the station.
 
 For "vibe", write the mood field as a short instruction a music programmer \
 could follow. For "track", give artist and title separately; if the listener \

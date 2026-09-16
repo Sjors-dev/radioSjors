@@ -419,6 +419,28 @@ class TestIntentRules(unittest.TestCase):
     def test_vibe_shift(self):
         self.assertEqual(_rules("make it darker")["kind"], "vibe")
 
+    def test_skip_is_not_a_ban(self):
+        # Skipping is harmless, banning throws a track out of the station.
+        # Reading one as the other is the worst mistake this classifier can
+        # make, so it gets its own test.
+        for phrase in ("skip", "!skip", "skip this song please", "skip it",
+                       "next song", "move on"):
+            self.assertEqual(_rules(phrase)["kind"], "skip", phrase)
+
+    def test_ban_is_still_a_ban(self):
+        for phrase in ("delete this song", "never play this again",
+                       "ban Runaway by Kanye West", "blacklist this"):
+            self.assertEqual(_rules(phrase)["kind"], "ban", phrase)
+
+    def test_skip_matches_whole_words_only(self):
+        self.assertNotEqual(_rules("skipper")["kind"], "skip")
+        self.assertEqual(_rules("what's next?")["kind"], "question")
+
+    def test_track_named_next_is_still_a_request(self):
+        result = _rules("play next to you by john legend")
+        self.assertEqual(result["kind"], "track")
+        self.assertEqual(result["artist"].lower(), "john legend")
+
     def test_question(self):
         self.assertEqual(_rules("what's playing?")["kind"], "question")
 
