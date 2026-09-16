@@ -99,8 +99,12 @@ class Runner:
     # -- one pass -----------------------------------------------------------
 
     def tick(self) -> None:
+        # Order matters. Chat first so a request is never stuck behind a slow
+        # render or download, then one patter line, then the slower background
+        # jobs. Each is bounded, so the loop always comes back around.
         self.feed_stream()
         self.handle_chat_requests()
+        self._safe(self.queue.render_pending, "patter render")
         self.maintain_buffer()
         self.background_work()
         self.feed_stream()
@@ -193,6 +197,13 @@ class Runner:
             return
         if self.library.count() == 0:
             log.debug("library empty, nothing to plan yet")
+            return
+
+        if self.queue.pending_count() > 0:
+            # Still voicing the last block. Planning another now would pile up
+            # more work in front of a renderer that is already behind.
+            log.debug("%d patter lines still to render, holding off planning",
+                      self.queue.pending_count())
             return
 
         log.info("buffer down to %s, planning a new block",

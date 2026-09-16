@@ -43,7 +43,7 @@ class QueueManager:
         """
         row = self.db.one(
             "SELECT COALESCE(SUM(duration), 0) AS total FROM queue_items "
-            "WHERE status IN ('ready', 'pushed')"
+            "WHERE status IN ('ready', 'pushed', 'pending')"
         )
         return float(row["total"]) if row else 0.0
 
@@ -100,7 +100,6 @@ class QueueManager:
         queued = 0
         songs = 0
         patter_ok = 0
-        patter_failed = 0
 
         for item in items:
             if item["kind"] == "song":
@@ -122,28 +121,59 @@ class QueueManager:
                 songs += 1
 
             elif item["kind"] == "patter":
-                text = item["text"]
-                audio = self.tts.render(text, name_hint=f"b{block_id}")
-                if audio is None:
-                    patter_failed += 1
-                    continue
+                # Recorded as 'pending' and rendered later, one line at a time,
+                # by the brain loop. Rendering a whole hour of patter inline
+                # blocks everything else -- chat requests included -- for as
+                # long as the voice takes, which on a slow CPU is minutes.
                 self.db.execute(
-                    "INSERT INTO queue_items(block_id, seq, kind, tier, path, text, "
+                    "INSERT INTO queue_items(block_id, seq, kind, tier, text, "
                     "title, artist, duration, status, created_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                    (block_id, seq, "patter", "ai", str(audio), text,
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (block_id, seq, "patter", "ai", item["text"],
                      "", self.cfg.get("station.name", "Radio"),
-                     wav_duration(audio), "ready", time.time()),
+                     0.0, "pending", time.time()),
                 )
                 seq += 1
                 queued += 1
                 patter_ok += 1
 
-        log.info("block %d queued: %d songs, %d patter lines (%d failed to render), "
+        log.info("block %d queued: %d songs, %d patter lines awaiting render, "
                  "source=%s, buffer now %s",
-                 block_id, songs, patter_ok, patter_failed, plan.get("source"),
+                 block_id, songs, patter_ok, plan.get("source"),
                  human_duration(self.ready_seconds()))
         return queued
+
+    def render_pending(self, limit: int = 1) -> int:
+        """Render the next queued patter line(s). Called once per tick.
+
+        Earliest first, because the front of the queue is what liquidsoap needs
+        next. A line that will not render is marked failed and dropped from the
+        running order rather than blocking it.
+        """
+        if self.tts is None:
+            return 0
+        rows = self.db.query(
+            "SELECT * FROM queue_items WHERE status='pending' ORDER BY seq LIMIT ?",
+            (limit,))
+        rendered = 0
+        for row in rows:
+            audio = self.tts.render(row["text"] or "", name_hint=f"b{row['block_id']}")
+            if audio is None:
+                self.db.execute(
+                    "UPDATE queue_items SET status='failed' WHERE id=?", (row["id"],))
+                log.info("patter dropped from the running order (render failed): %.50s",
+                         row["text"] or "")
+                continue
+            self.db.execute(
+                "UPDATE queue_items SET status='ready', path=?, duration=? WHERE id=?",
+                (str(audio), wav_duration(audio), row["id"]))
+            rendered += 1
+        return rendered
+
+    def pending_count(self) -> int:
+        row = self.db.one(
+            "SELECT COUNT(*) AS n FROM queue_items WHERE status='pending'")
+        return int(row["n"]) if row else 0
 
     # -- requests -----------------------------------------------------------
 
@@ -164,11 +194,15 @@ class QueueManager:
     def take_next(self, tier: str, limit: int = 1) -> list[dict]:
         """Claim the next ready items of a tier and mark them pushed."""
         rows = self.db.query(
-            "SELECT * FROM queue_items WHERE status='ready' AND tier=? "
-            "ORDER BY seq LIMIT ?", (tier, limit),
+            "SELECT * FROM queue_items WHERE status IN ('ready','pending') "
+            "AND tier=? ORDER BY seq LIMIT ?", (tier, limit),
         )
         claimed = []
         for row in rows:
+            if row["status"] != "ready":
+                # The next item is still being voiced. Wait for it rather than
+                # playing the song that was meant to come after the link.
+                break
             path = Path(row["path"] or "")
             if not path.exists():
                 log.warning("queued file vanished, dropping: %s", row["path"])

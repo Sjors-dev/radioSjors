@@ -742,20 +742,67 @@ class TestQueue(RadioTestCase):
         self.planner = Planner(self.cfg, self.db, self.library, LLM(self.cfg))
         self.seed_library(artists=8, per_artist=4)
 
-    def test_build_block_queues_songs(self):
-        plan = self.planner.plan_block(datetime(2026, 1, 1, 14, 0))
-        queued = self.queue.build_block(plan)
-        self.assertGreater(queued, 0)
-        self.assertEqual(queued, self.queue.ready_count())
+    def build_raw(self) -> int:
+        """Build a block, leaving patter lines pending as the brain does."""
+        return self.queue.build_block(
+            self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
 
-    def test_patter_is_skipped_when_tts_is_off(self):
-        plan = self.planner.plan_block(datetime(2026, 1, 1, 14, 0))
-        self.queue.build_block(plan)
-        rows = self.db.query("SELECT kind FROM queue_items")
-        self.assertTrue(all(row["kind"] == "song" for row in rows))
+    def build(self) -> int:
+        """Build a block and drain the render queue.
+
+        tts.engine is "none" in tests, so every patter line fails and is
+        dropped -- leaving a songs-only queue, which is what the tests below
+        care about.
+        """
+        count = self.build_raw()
+        while self.queue.pending_count():
+            self.queue.render_pending(limit=10)
+        return count
+
+    def test_build_block_queues_songs(self):
+        queued = self.build_raw()
+        self.assertGreater(queued, 0)
+        self.assertEqual(queued,
+                         self.queue.ready_count() + self.queue.pending_count())
+
+    def test_patter_is_queued_pending_not_rendered_inline(self):
+        # Building a block must be fast: rendering an hour of patter inline
+        # blocks the brain, and chat requests queue behind it.
+        self.build_raw()
+        pending = self.db.query("SELECT * FROM queue_items WHERE status='pending'")
+        self.assertGreater(len(pending), 0)
+        self.assertTrue(all(row["kind"] == "patter" for row in pending))
+        self.assertTrue(all(row["path"] is None for row in pending))
+
+    def test_failed_patter_is_dropped_not_left_blocking(self):
+        # tts.engine is "none" in these tests, so every render fails.
+        self.build_raw()
+        while self.queue.pending_count():
+            self.queue.render_pending(limit=5)
+        self.assertEqual(
+            self.db.one("SELECT COUNT(*) AS n FROM queue_items "
+                        "WHERE status='pending'")["n"], 0)
+        self.assertGreater(
+            self.db.one("SELECT COUNT(*) AS n FROM queue_items "
+                        "WHERE status='failed'")["n"], 0)
+
+    def test_take_next_waits_for_an_unrendered_line(self):
+        # The running order has to hold: playing the song that was meant to
+        # follow a link, before the link, would sound broken.
+        self.build_raw()
+        first = self.db.one("SELECT id, kind FROM queue_items ORDER BY seq LIMIT 1")
+        self.db.execute("UPDATE queue_items SET status='pending', path=NULL "
+                        "WHERE id=?", (first["id"],))
+        self.assertEqual(self.queue.take_next("ai", limit=3), [])
+
+    def test_take_next_resumes_once_the_line_is_ready(self):
+        self.build_raw()
+        while self.queue.pending_count():
+            self.queue.render_pending(limit=5)
+        self.assertEqual(len(self.queue.take_next("ai", limit=3)), 3)
 
     def test_take_next_claims_items_once(self):
-        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        self.build()
         first = self.queue.take_next("ai", limit=2)
         second = self.queue.take_next("ai", limit=2)
         self.assertEqual(len(first), 2)
@@ -763,7 +810,7 @@ class TestQueue(RadioTestCase):
         self.assertFalse({i["id"] for i in first} & {i["id"] for i in second})
 
     def test_take_next_marks_tracks_played(self):
-        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        self.build()
         item = self.queue.take_next("ai", limit=1)[0]
         row = self.db.one("SELECT play_count, last_played_at FROM tracks WHERE id=?",
                           (item["track_id"],))
@@ -771,8 +818,9 @@ class TestQueue(RadioTestCase):
         self.assertIsNotNone(row["last_played_at"])
 
     def test_take_next_drops_vanished_files(self):
-        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
-        row = self.db.one("SELECT id, path FROM queue_items ORDER BY seq LIMIT 1")
+        self.build()
+        row = self.db.one("SELECT id, path FROM queue_items WHERE status='ready' "
+                          "ORDER BY seq LIMIT 1")
         Path(row["path"]).unlink()
         claimed = self.queue.take_next("ai", limit=1)
         self.assertNotEqual(claimed[0]["id"] if claimed else None, row["id"])
@@ -780,7 +828,7 @@ class TestQueue(RadioTestCase):
         self.assertEqual(after["status"], "failed")
 
     def test_requests_are_a_separate_tier(self):
-        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        self.build()
         track = dict(self.db.one("SELECT * FROM tracks LIMIT 1"))
         self.queue.enqueue_request(track)
         self.assertEqual(len(self.queue.take_next("request", limit=5)), 1)
@@ -793,7 +841,7 @@ class TestQueue(RadioTestCase):
         self.assertFalse(self.queue.needs_block())
 
     def test_pushed_items_still_count_towards_the_buffer(self):
-        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        self.build()
         before = self.queue.ready_seconds()
         self.queue.take_next("ai", limit=3)
         self.assertAlmostEqual(self.queue.ready_seconds(), before, places=3,
@@ -801,7 +849,7 @@ class TestQueue(RadioTestCase):
                                    "change how much audio is waiting")
 
     def test_reconcile_retires_items_liquidsoap_has_played(self):
-        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        self.build()
         self.queue.take_next("ai", limit=5)
         before = self.queue.ready_seconds()
         # Liquidsoap reports 2 still queued: the other 3 have been played.
@@ -813,7 +861,7 @@ class TestQueue(RadioTestCase):
     def test_buffer_does_not_grow_without_bound(self):
         # The bug this guards: pushed items were never retired, so the buffer
         # reading climbed forever and the planner stopped building blocks.
-        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        self.build()
         for _ in range(6):
             self.queue.take_next("ai", limit=2)
             self.queue.reconcile_pushed("ai", 1)
@@ -825,7 +873,7 @@ class TestQueue(RadioTestCase):
             "buffer is counting audio that has already been played")
 
     def test_reconcile_keeps_the_newest_items(self):
-        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        self.build()
         pushed = self.queue.take_next("ai", limit=4)
         self.queue.reconcile_pushed("ai", 2)
         still = self.db.query(
@@ -834,7 +882,7 @@ class TestQueue(RadioTestCase):
                          [item["id"] for item in pushed[-2:]])
 
     def test_reconcile_does_not_touch_the_other_tier(self):
-        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        self.build()
         track = dict(self.db.one("SELECT * FROM tracks LIMIT 1"))
         self.queue.enqueue_request(track)
         self.queue.take_next("request", limit=1)
@@ -845,7 +893,7 @@ class TestQueue(RadioTestCase):
         self.assertEqual(row["status"], "pushed")
 
     def test_clear_pending_only_drops_unplayed(self):
-        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        self.build()
         self.queue.take_next("ai", limit=2)
         before = self.db.one("SELECT COUNT(*) AS n FROM queue_items")["n"]
         self.queue.clear_pending("ai")
