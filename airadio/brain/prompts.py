@@ -17,6 +17,10 @@ Rules you must not break:
 - Patter lines are spoken aloud by a text-to-speech voice. Write plain spoken
   prose: no markdown, no emoji, no stage directions, no asterisks, no bullet
   points, no URLs, no numbers written as digits when a word reads better.
+- Do not play the same artist again within {artist_spacing} songs. No back-to-back
+  pairs from one artist, no "two in a row" sets. Spread each artist out across
+  the hour. If the candidate list is too small to manage that, get as close as
+  you can, but never place two songs by the same artist next to each other.
 - Keep each patter line under {max_words} words. Short is better than clever.
 - A patter line may back-announce the track that just finished and introduce the
   one coming next. You are told which is which.

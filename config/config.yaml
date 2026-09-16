@@ -58,8 +58,13 @@ planner:
   buffer_minutes: 60
   # Don't repeat a track that played within this many hours.
   repeat_cooldown_hours: 8
-  # Don't play the same artist twice within this many tracks.
+  # Don't play the same artist twice within this many tracks. Enforced in the
+  # fallback planner, and instructed to the LLM in the planning prompt.
   artist_spacing: 4
+  # Cap tracks per artist in the pool offered to the LLM, so it cannot
+  # programme an artist back-to-back just because that is what it was given.
+  # 0 = work it out from the pool size and how many artists are available.
+  max_per_artist_in_pool: 0
   # How many candidates to offer the LLM per block (keeps the prompt small).
   candidate_pool: 60
   # Hour ranges are [start, end) in 24h local time and must cover 0-23.

@@ -552,6 +552,46 @@ class TestFallbackPlanner(RadioTestCase):
         raw = [{"type": "song", "id": 900000 + n} for n in range(10)]
         self.assertEqual(self.planner._validate(raw, candidates, 10), [])
 
+    def test_pool_is_spread_across_artists(self):
+        # 3 artists with 20 tracks each: a random pool would hand the LLM a
+        # lopsided menu and it would programme artists back to back.
+        self.seed_library(artists=3, per_artist=20)
+        pool = self.planner.select_candidates([1, 5], 30)
+        counts: dict[str, int] = {}
+        for track in pool:
+            counts[track["artist"]] = counts.get(track["artist"], 0) + 1
+        self.assertEqual(len(counts), 3)
+        self.assertLessEqual(max(counts.values()) - min(counts.values()), 1,
+                             f"pool is lopsided: {counts}")
+
+    def test_pool_respects_an_explicit_cap(self):
+        self.seed_library(artists=4, per_artist=10)
+        self.planner.cfg._data["planner"]["max_per_artist_in_pool"] = 2
+        pool = self.planner.select_candidates([1, 5], 40)
+        counts: dict[str, int] = {}
+        for track in pool:
+            counts[track["artist"]] = counts.get(track["artist"], 0) + 1
+        self.assertTrue(all(n <= 2 for n in counts.values()), counts)
+
+    def test_single_artist_library_still_returns_tracks(self):
+        self.seed_library(artists=1, per_artist=8)
+        self.assertEqual(len(self.planner.select_candidates([1, 5], 30)), 8)
+
+    def test_artist_repeats_are_logged(self):
+        self.seed_library(artists=2, per_artist=6)
+        candidates = self.planner.select_candidates([1, 5], 20)
+        same = [t for t in candidates if t["artist"] == candidates[0]["artist"]][:3]
+        others = [t for t in candidates if t["artist"] != candidates[0]["artist"]][:3]
+        # Interleave so there are enough songs to pass validation, but put two
+        # by the same artist adjacent.
+        raw = [{"type": "song", "id": same[0]["id"]},
+               {"type": "song", "id": same[1]["id"]}]
+        raw += [{"type": "song", "id": t["id"]} for t in others]
+        with self.assertLogs("planner", level="WARNING") as captured:
+            self.planner._validate(raw, candidates, 5)
+        self.assertTrue(any("spacing window" in line for line in captured.output),
+                        captured.output)
+
     def test_mood_state_round_trip(self):
         self.planner.set_mood("darker and slower")
         self.assertEqual(self.planner.current_mood(), "darker and slower")

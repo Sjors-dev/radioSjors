@@ -78,7 +78,37 @@ class Planner:
                 (pool_size,),
             )
 
-        return [dict(row) for row in rows if Path(row["path"]).exists()]
+        tracks = [dict(row) for row in rows if Path(row["path"]).exists()]
+        return self._diversify(tracks, pool_size)
+
+    def _diversify(self, tracks: list[dict], pool_size: int) -> list[dict]:
+        """Cap how many tracks per artist reach the LLM.
+
+        A random pool from a library dominated by a few artists hands the model
+        eight tracks by one of them, and it dutifully programmes them together.
+        Round-robin by artist instead, so the menu itself is spread out.
+        """
+        by_artist: dict[str, list[dict]] = {}
+        for track in tracks:
+            by_artist.setdefault(track.get("artist", ""), []).append(track)
+
+        if len(by_artist) < 2:
+            return tracks
+
+        cap = int(self.cfg.get("planner.max_per_artist_in_pool", 0) or 0)
+        if cap <= 0:
+            # Enough of each artist to give the model choice, never enough to
+            # fill the hour from one of them.
+            cap = max(2, pool_size // max(4, len(by_artist)))
+
+        ordered: list[dict] = []
+        for round_index in range(cap):
+            for artist_tracks in by_artist.values():
+                if round_index < len(artist_tracks):
+                    ordered.append(artist_tracks[round_index])
+        log.debug("candidate pool: %d tracks across %d artists (max %d each)",
+                  len(ordered), len(by_artist), cap)
+        return ordered[:pool_size]
 
     def _recent_titles(self, limit: int = 12) -> list[str]:
         rows = self.db.query(
@@ -137,6 +167,7 @@ class Planner:
             persona=self.cfg.get("dj.persona", "You are a radio DJ."),
             language=self.cfg.get("dj.language", "english"),
             max_words=max_words,
+            artist_spacing=int(self.cfg.get("planner.artist_spacing", 4)),
         )
         user = PLANNER_USER.format(
             clock=now.strftime("%H:%M"),
@@ -210,7 +241,29 @@ class Planner:
         # Never end a block on patter: it would leave dead air pointing nowhere.
         while items and items[-1]["kind"] == "patter":
             items.pop()
+
+        self._report_artist_spacing(items)
         return items
+
+    def _report_artist_spacing(self, items: list[dict]) -> None:
+        """Log artist repeats the model slipped in.
+
+        Not enforced by dropping tracks: the patter lines name the songs around
+        them, so removing one would leave the DJ introducing a track that no
+        longer plays. The prompt and the diversified pool do the work; this is
+        how you find out when they were not enough.
+        """
+        spacing = int(self.cfg.get("planner.artist_spacing", 4))
+        artists = [item["track"]["artist"] for item in items
+                   if item["kind"] == "song"]
+        clashes = [
+            artist for index, artist in enumerate(artists)
+            if artist in artists[max(0, index - spacing):index]
+        ]
+        if clashes:
+            log.warning("LLM repeated %d artist(s) inside the %d-track spacing "
+                        "window: %s", len(clashes), spacing,
+                        ", ".join(sorted(set(clashes))))
 
     def _plan_fallback(self, now: datetime, profile: dict, candidates: list[dict],
                        track_count: int) -> dict:
