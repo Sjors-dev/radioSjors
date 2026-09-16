@@ -105,8 +105,13 @@ class Runner:
     # -- stream feeding -----------------------------------------------------
 
     def feed_stream(self) -> None:
-        """Keep liquidsoap's queues shallow but never empty."""
-        connected = self.ls.connected
+        """Keep liquidsoap's queues shallow but never empty.
+
+        One telnet connection per call: liquidsoap logs every connect and
+        disconnect, and this runs every few seconds for years.
+        """
+        state = self.ls.poll(AI_QUEUE)
+        connected = state is not None
         if connected != self._last_connected:
             if connected:
                 log.info("connected to liquidsoap telnet")
@@ -114,10 +119,11 @@ class Runner:
                 log.warning("liquidsoap telnet unreachable - is the stream service up? "
                             "(queue is safe, items stay ready)")
             self._last_connected = connected
-        if not connected:
+        if state is None:
             return
 
-        self._update_now_playing()
+        _, current, depth = state
+        self._update_now_playing(current)
 
         # Tier 1: listener requests, pushed immediately and in full.
         for item in self.queue.take_next("request", limit=4):
@@ -125,21 +131,17 @@ class Runner:
 
         # Tier 2: the AI-planned block, topped up to a shallow depth so a vibe
         # shift or a re-plan takes effect within a couple of tracks.
-        depth = self.ls.queue_length(AI_QUEUE)
-        if depth < 0:
-            return
         missing = self.queue_depth - depth
         if missing > 0:
             for item in self.queue.take_next("ai", limit=missing):
                 self._push(AI_QUEUE, item)
 
-    def _update_now_playing(self) -> None:
+    def _update_now_playing(self, current: str) -> None:
         """Mirror liquidsoap's current track into a file the bot can read.
 
         Cheaper than giving the bot its own telnet dependency, and it survives
         the stream being restarted.
         """
-        current = self.ls.now_playing()
         if not current or current == self._last_now_playing:
             return
         self._last_now_playing = current

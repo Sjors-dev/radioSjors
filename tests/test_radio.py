@@ -270,6 +270,113 @@ class TestMetadataParsing(unittest.TestCase):
         self.assertTrue(uri.endswith("x.mp3"))
 
 
+class FakeLiquidsoap:
+    """A socket server that answers like liquidsoap's telnet, so the batching
+    and the END-framing are tested against real bytes rather than a mock."""
+
+    def __init__(self, replies: dict[str, str]):
+        import socket as socket_module
+        import threading
+
+        self.replies = replies
+        self.commands_seen: list[str] = []
+        self.said_goodbye = False
+        self.connections = 0
+        self._server = socket_module.socket()
+        self._server.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_REUSEADDR, 1)
+        self._server.bind(("127.0.0.1", 0))
+        self._server.listen(4)
+        self.port = self._server.getsockname()[1]
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self._server.accept()
+            except OSError:
+                return
+            self.connections += 1
+            with conn:
+                buffer = ""
+                while True:
+                    try:
+                        data = conn.recv(4096)
+                    except OSError:
+                        break
+                    if not data:
+                        break
+                    buffer += data.decode("utf-8", "replace").replace("\r", "")
+                    while "\n" in buffer:
+                        line, _, buffer = buffer.partition("\n")
+                        line = line.strip()
+                        if line == "quit":
+                            self.said_goodbye = True
+                            return
+                        self.commands_seen.append(line)
+                        body = self.replies.get(line, "")
+                        payload = (body + "\n" if body else "") + "END\r\n"
+                        conn.sendall(payload.encode("utf-8"))
+
+    def close(self):
+        try:
+            self._server.close()
+        except OSError:
+            pass
+
+
+class TestLiquidsoapProtocol(unittest.TestCase):
+    def setUp(self):
+        from airadio.liquidsoap import LiquidsoapClient
+
+        self.server = FakeLiquidsoap({
+            "uptime": "5 days",
+            "aiqueue.queue": "3 4 5",
+            "caster.metadata": '--- 1 ---\nartist="Gunna"\ntitle="fukumean"',
+            "aiqueue.push /music/x.mp3": "7",
+        })
+        self.client = LiquidsoapClient("127.0.0.1", self.server.port, timeout=5.0)
+
+    def tearDown(self):
+        self.server.close()
+
+    def test_single_command(self):
+        self.assertEqual(self.client.command("uptime"), "5 days")
+
+    def test_batched_commands_come_back_in_order(self):
+        responses = self.client.commands(["uptime", "aiqueue.queue"])
+        self.assertEqual(responses[0], "5 days")
+        self.assertEqual(responses[1], "3 4 5")
+
+    def test_batch_uses_one_connection(self):
+        self.client.commands(["uptime", "aiqueue.queue", "caster.metadata"])
+        self.assertEqual(self.server.connections, 1)
+
+    def test_client_says_goodbye(self):
+        # Otherwise liquidsoap logs "disconnected without saying goodbye" on
+        # every poll, which is every few seconds, forever.
+        self.client.command("uptime")
+        self.assertTrue(self.server.said_goodbye)
+
+    def test_poll_returns_everything_the_feeder_needs(self):
+        state = self.client.poll("aiqueue")
+        self.assertIsNotNone(state)
+        connected, now_playing, depth = state
+        self.assertTrue(connected)
+        self.assertEqual(now_playing, "Gunna - fukumean")
+        self.assertEqual(depth, 3)
+
+    def test_poll_on_a_dead_server_returns_none(self):
+        from airadio.liquidsoap import LiquidsoapClient
+
+        dead = LiquidsoapClient("127.0.0.1", 9, timeout=1.0)
+        self.assertIsNone(dead.poll("aiqueue"))
+        self.assertFalse(dead.connected)
+
+    def test_push(self):
+        self.assertTrue(self.client.push("aiqueue", "/music/x.mp3"))
+
+
 class TestIntentRules(unittest.TestCase):
     def test_play_with_artist(self):
         result = _rules("play bohemian rhapsody by queen")

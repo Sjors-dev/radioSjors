@@ -255,8 +255,18 @@ liquidsoap's `mksafe` is streaming silence on purpose — that's correct
 behaviour, it's holding the mount. Run `bootstrap`.
 
 **Stream won't connect to caster.fm.** `journalctl -u ai-radio-stream -n 50`.
-Wrong password, wrong mount spelling (leading slash!), or the mount is already
-in use by an old source. caster.fm lets you kick the source from its dashboard.
+`Connection refused` means nothing is listening: the server is stopped in the
+caster.fm dashboard (start it), or the port is wrong. An authentication error
+instead means a wrong password, a wrong mount spelling (leading slash!), or
+the mount is already in use by an old source, which you can kick from the
+dashboard. After changing `.env` you must re-run `main.py stream-config` and
+restart the service -- the password lives in the generated `.liq`.
+
+To see just the connection state in a noisy log:
+
+```bash
+journalctl -u ai-radio-stream --no-pager | grep -iE "caster|connect" | tail -20
+```
 
 **No patter, only music.** TTS isn't working. `main.py doctor` names the reason,
 and `main.py tts-test "hello"` tries a single render. The station is *designed*

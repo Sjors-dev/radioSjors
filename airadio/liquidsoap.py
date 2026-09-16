@@ -31,23 +31,45 @@ class LiquidsoapClient:
 
     def command(self, text: str) -> str | None:
         """Run one telnet command. Returns the response, or None if unreachable."""
+        results = self.commands([text])
+        return results[0] if results else None
+
+    def commands(self, texts: list[str]) -> list[str] | None:
+        """Run several commands down one connection.
+
+        Liquidsoap logs a line per telnet connect and disconnect, so opening a
+        socket per command turns a 5-second poll into a flooded journal.  One
+        connection per tick, closed politely with `quit`, keeps the stream log
+        readable.
+
+        Returns one response per command, or None if liquidsoap is unreachable.
+        """
+        if not texts:
+            return []
         try:
             with socket.create_connection((self.host, self.port), self.timeout) as sock:
                 sock.settimeout(self.timeout)
-                sock.sendall((text + "\n").encode("utf-8"))
+                sock.sendall("".join(f"{text}\n" for text in texts).encode("utf-8"))
 
-                chunks: list[bytes] = []
-                while True:
+                buffer = ""
+                responses: list[str] = []
+                while len(responses) < len(texts):
                     data = sock.recv(4096)
                     if not data:
                         break
-                    chunks.append(data)
-                    if b"\nEND\r\n" in b"".join(chunks) or b"\nEND\n" in b"".join(chunks):
-                        break
+                    buffer += data.decode("utf-8", "replace").replace("\r", "")
+                    buffer = _drain(buffer, responses)
 
-                raw = b"".join(chunks).decode("utf-8", "replace")
-                lines = [line.strip() for line in raw.replace("\r", "").split("\n")]
-                return "\n".join(line for line in lines if line and line != "END")
+                try:
+                    # Without this liquidsoap logs "disconnected without saying
+                    # goodbye" on every single poll.
+                    sock.sendall(b"quit\n")
+                except OSError:
+                    pass
+
+                while len(responses) < len(texts):
+                    responses.append("")
+                return responses
         except (socket.timeout, OSError) as exc:
             log.debug("liquidsoap telnet %s:%s unreachable (%s)",
                       self.host, self.port, exc)
@@ -88,6 +110,19 @@ class LiquidsoapClient:
         if not response:
             return ""
         return format_metadata(parse_metadata(response))
+
+    def poll(self, queue_id: str) -> tuple[bool, str, int] | None:
+        """Everything the feeder needs, in one connection per tick.
+
+        Returns (connected, now playing, queue depth). None means unreachable,
+        which is also how "connected" is established -- no separate ping.
+        """
+        responses = self.commands([f"{OUTPUT_ID}.metadata", f"{queue_id}.queue"])
+        if responses is None:
+            return None
+        metadata, queue = (responses + ["", ""])[:2]
+        depth = len([part for part in queue.split() if part.strip()])
+        return True, format_metadata(parse_metadata(metadata)), depth
 
 
 def parse_metadata(response: str) -> dict:
@@ -145,3 +180,32 @@ def _escape(value: str) -> str:
                  .replace("\n", " ")
                  .replace(":", " -")
                  .strip())
+
+
+def _drain(buffer: str, responses: list[str]) -> str:
+    """Pull every complete response out of the buffer, leaving the remainder.
+
+    Liquidsoap terminates each command's reply with a line containing just
+    "END", so responses are split on that rather than on connection close.
+    """
+    while True:
+        marker = _find_end(buffer)
+        if marker is None:
+            return buffer
+        start, stop = marker
+        body = buffer[:start]
+        lines = [line.strip() for line in body.split("\n")]
+        responses.append("\n".join(line for line in lines if line))
+        buffer = buffer[stop:]
+
+
+def _find_end(buffer: str) -> tuple[int, int] | None:
+    """Locate a whole-line 'END' terminator: (body end, next response start)."""
+    position = 0
+    while True:
+        index = buffer.find("END\n", position)
+        if index == -1:
+            return None
+        if index == 0 or buffer[index - 1] == "\n":
+            return index, index + 4
+        position = index + 4
