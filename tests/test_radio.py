@@ -332,6 +332,7 @@ class TestLiquidsoapProtocol(unittest.TestCase):
         self.server = FakeLiquidsoap({
             "uptime": "5 days",
             "aiqueue.queue": "3 4 5",
+            "reqqueue.queue": "",
             "caster.metadata": '--- 1 ---\nartist="Gunna"\ntitle="fukumean"',
             "aiqueue.push /music/x.mp3": "7",
         })
@@ -361,10 +362,14 @@ class TestLiquidsoapProtocol(unittest.TestCase):
     def test_poll_returns_everything_the_feeder_needs(self):
         state = self.client.poll("aiqueue")
         self.assertIsNotNone(state)
-        connected, now_playing, depth = state
-        self.assertTrue(connected)
-        self.assertEqual(now_playing, "Gunna - fukumean")
-        self.assertEqual(depth, 3)
+        self.assertEqual(state["now_playing"], "Gunna - fukumean")
+        self.assertEqual(state["depths"]["aiqueue"], 3)
+
+    def test_poll_reads_both_queues_in_one_connection(self):
+        state = self.client.poll("aiqueue", "reqqueue")
+        self.assertEqual(state["depths"]["aiqueue"], 3)
+        self.assertEqual(state["depths"]["reqqueue"], 0)
+        self.assertEqual(self.server.connections, 1)
 
     def test_poll_on_a_dead_server_returns_none(self):
         from airadio.liquidsoap import LiquidsoapClient
@@ -764,6 +769,58 @@ class TestQueue(RadioTestCase):
             "INSERT INTO queue_items(seq, kind, tier, path, duration, status, "
             "created_at) VALUES(1,'song','ai','x.mp3',99999,'ready',0)")
         self.assertFalse(self.queue.needs_block())
+
+    def test_pushed_items_still_count_towards_the_buffer(self):
+        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        before = self.queue.ready_seconds()
+        self.queue.take_next("ai", limit=3)
+        self.assertAlmostEqual(self.queue.ready_seconds(), before, places=3,
+                               msg="handing an item to liquidsoap must not "
+                                   "change how much audio is waiting")
+
+    def test_reconcile_retires_items_liquidsoap_has_played(self):
+        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        self.queue.take_next("ai", limit=5)
+        before = self.queue.ready_seconds()
+        # Liquidsoap reports 2 still queued: the other 3 have been played.
+        self.queue.reconcile_pushed("ai", 2)
+        self.assertLess(self.queue.ready_seconds(), before)
+        done = self.db.one("SELECT COUNT(*) AS n FROM queue_items WHERE status='done'")
+        self.assertEqual(done["n"], 3)
+
+    def test_buffer_does_not_grow_without_bound(self):
+        # The bug this guards: pushed items were never retired, so the buffer
+        # reading climbed forever and the planner stopped building blocks.
+        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        for _ in range(6):
+            self.queue.take_next("ai", limit=2)
+            self.queue.reconcile_pushed("ai", 1)
+        remaining = self.db.one(
+            "SELECT COUNT(*) AS n FROM queue_items WHERE status IN ('ready','pushed')")
+        self.assertLessEqual(
+            self.queue.ready_seconds(),
+            remaining["n"] * 600,
+            "buffer is counting audio that has already been played")
+
+    def test_reconcile_keeps_the_newest_items(self):
+        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        pushed = self.queue.take_next("ai", limit=4)
+        self.queue.reconcile_pushed("ai", 2)
+        still = self.db.query(
+            "SELECT id FROM queue_items WHERE status='pushed' ORDER BY seq")
+        self.assertEqual([row["id"] for row in still],
+                         [item["id"] for item in pushed[-2:]])
+
+    def test_reconcile_does_not_touch_the_other_tier(self):
+        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        track = dict(self.db.one("SELECT * FROM tracks LIMIT 1"))
+        self.queue.enqueue_request(track)
+        self.queue.take_next("request", limit=1)
+        self.queue.take_next("ai", limit=3)
+        self.queue.reconcile_pushed("ai", 0)
+        row = self.db.one(
+            "SELECT status FROM queue_items WHERE tier='request' ORDER BY id DESC LIMIT 1")
+        self.assertEqual(row["status"], "pushed")
 
     def test_clear_pending_only_drops_unplayed(self):
         self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))

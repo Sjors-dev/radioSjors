@@ -110,7 +110,7 @@ class Runner:
         One telnet connection per call: liquidsoap logs every connect and
         disconnect, and this runs every few seconds for years.
         """
-        state = self.ls.poll(AI_QUEUE)
+        state = self.ls.poll(AI_QUEUE, REQUEST_QUEUE)
         connected = state is not None
         if connected != self._last_connected:
             if connected:
@@ -122,8 +122,16 @@ class Runner:
         if state is None:
             return
 
-        _, current, depth = state
-        self._update_now_playing(current)
+        depth = state["depths"].get(AI_QUEUE, 0)
+        self._update_now_playing(state["now_playing"])
+
+        # Liquidsoap owns playback, so its queue depth is the only signal for
+        # what it has finished. Without this, pushed items count towards the
+        # buffer forever and the planner eventually stops building blocks.
+        # The +1 covers the track that has left the queue and is on air.
+        self.queue.reconcile_pushed("ai", depth + 1)
+        self.queue.reconcile_pushed(
+            "request", state["depths"].get(REQUEST_QUEUE, 0))
 
         # Tier 1: listener requests, pushed immediately and in full.
         for item in self.queue.take_next("request", limit=4):

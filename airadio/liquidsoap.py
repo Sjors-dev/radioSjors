@@ -111,18 +111,26 @@ class LiquidsoapClient:
             return ""
         return format_metadata(parse_metadata(response))
 
-    def poll(self, queue_id: str) -> tuple[bool, str, int] | None:
+    def poll(self, *queue_ids: str) -> dict | None:
         """Everything the feeder needs, in one connection per tick.
 
-        Returns (connected, now playing, queue depth). None means unreachable,
-        which is also how "connected" is established -- no separate ping.
+        Returns {"now_playing": str, "depths": {queue_id: int}}, or None if
+        liquidsoap is unreachable -- which is also how "connected" is
+        established, so there is no separate ping.
         """
-        responses = self.commands([f"{OUTPUT_ID}.metadata", f"{queue_id}.queue"])
+        queue_ids = queue_ids or (AI_QUEUE, REQUEST_QUEUE)
+        responses = self.commands(
+            [f"{OUTPUT_ID}.metadata"] + [f"{q}.queue" for q in queue_ids])
         if responses is None:
             return None
-        metadata, queue = (responses + ["", ""])[:2]
-        depth = len([part for part in queue.split() if part.strip()])
-        return True, format_metadata(parse_metadata(metadata)), depth
+
+        padded = responses + [""] * (1 + len(queue_ids) - len(responses))
+        depths = {
+            queue_id: len([part for part in padded[index + 1].split() if part.strip()])
+            for index, queue_id in enumerate(queue_ids)
+        }
+        return {"now_playing": format_metadata(parse_metadata(padded[0])),
+                "depths": depths}
 
 
 def parse_metadata(response: str) -> dict:

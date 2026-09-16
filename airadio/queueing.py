@@ -34,12 +34,39 @@ class QueueManager:
     # -- measurements -------------------------------------------------------
 
     def ready_seconds(self) -> float:
-        """Audio already rendered and waiting, in seconds."""
+        """Audio rendered and not yet played, in seconds.
+
+        Only counts items still waiting: 'ready' (held here) plus 'pushed'
+        (handed to liquidsoap but not yet played). Items liquidsoap has
+        finished with are reconciled to 'done' by the feeder -- without that
+        this figure grows forever and the planner stops building blocks.
+        """
         row = self.db.one(
             "SELECT COALESCE(SUM(duration), 0) AS total FROM queue_items "
             "WHERE status IN ('ready', 'pushed')"
         )
         return float(row["total"]) if row else 0.0
+
+    def reconcile_pushed(self, tier: str, still_queued: int) -> int:
+        """Mark pushed items liquidsoap has already played as done.
+
+        Liquidsoap owns playback, so the only way to know what it has finished
+        is to compare what we pushed against how deep its queue still is.
+        Everything older than that has been played.
+        """
+        rows = self.db.query(
+            "SELECT id FROM queue_items WHERE status='pushed' AND tier=? "
+            "ORDER BY seq DESC LIMIT ?", (tier, max(0, still_queued)),
+        )
+        keep = [row["id"] for row in rows]
+        placeholders = ",".join("?" * len(keep))
+        sql = ("UPDATE queue_items SET status='done' "
+               "WHERE status='pushed' AND tier=?")
+        params: list = [tier]
+        if keep:
+            sql += f" AND id NOT IN ({placeholders})"
+            params.extend(keep)
+        return self.db.execute(sql, params)
 
     def ready_count(self) -> int:
         row = self.db.one(
@@ -175,12 +202,12 @@ class QueueManager:
 
     def prune_history(self, keep: int = 500) -> int:
         """Keep the table small; played items are only kept for the log."""
-        row = self.db.one("SELECT COUNT(*) AS n FROM queue_items WHERE status='pushed'")
+        row = self.db.one("SELECT COUNT(*) AS n FROM queue_items WHERE status='done'")
         if not row or row["n"] <= keep:
             return 0
         return self.db.execute(
-            "DELETE FROM queue_items WHERE status='pushed' AND id NOT IN "
-            "(SELECT id FROM queue_items WHERE status='pushed' ORDER BY id DESC LIMIT ?)",
+            "DELETE FROM queue_items WHERE status='done' AND id NOT IN "
+            "(SELECT id FROM queue_items WHERE status='done' ORDER BY id DESC LIMIT ?)",
             (keep,),
         )
 
