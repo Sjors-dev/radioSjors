@@ -132,6 +132,6 @@ TTS is local. The only bill is caster.fm, if you choose a paid tier there.
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-54 offline tests — no network, no ffmpeg, no liquidsoap needed. They cover the
-quality filters, de-duplication, the fallback planner, queue claiming and the
-LLM JSON parsing.
+79 offline tests — no network, no ffmpeg, no liquidsoap needed. They cover the
+quality filters, de-duplication, banning, the fallback planner, artist spacing,
+queue claiming, LLM failover, and the liquidsoap telnet protocol.
