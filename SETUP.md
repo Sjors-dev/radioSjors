@@ -1,0 +1,286 @@
+# Setup — ASUS X551MA, Linux Mint 22.2
+
+Follow these in order. Each step is checkable before you move on.
+
+Everything runs as your normal user. Nothing here needs a root shell; the
+scripts call `sudo` where they need it.
+
+---
+
+## 0. Get the code onto the laptop
+
+Copy this folder over (USB stick, `scp`, git — whatever you prefer) to
+somewhere like `/home/<you>/ai-radio`, then:
+
+```bash
+cd ~/ai-radio
+```
+
+---
+
+## 1. Collect the credentials
+
+You need these before anything will work. All free, none need a card.
+
+| What | Where | Notes |
+|------|-------|-------|
+| **caster.fm** host, port, mount, password | caster.fm dashboard → server / source details | The mount usually looks like `/stream`. Also check **which plan tier** you're on — see [note below](#a-note-on-the-castorfm-tier). |
+| **Last.fm API key** | https://www.last.fm/api/account/create | Instant. Only the API key is needed, not the secret. |
+| **Gemini API key** | https://aistudio.google.com/apikey | Free tier, no card. |
+| **Groq API key** | https://console.groq.com/keys | Free tier, no card. Having both gives you automatic failover. |
+| **Discord bot token** | https://discord.com/developers/applications | New Application → Bot → Reset Token. **Turn on "MESSAGE CONTENT INTENT"** under Bot → Privileged Gateway Intents, or the bot will see empty messages. |
+| **Discord channel ID** | In Discord: Settings → Advanced → Developer Mode, then right-click your channel → Copy Channel ID | Optional. Leave blank to let the bot listen anywhere it can see. |
+
+To get the bot into your server: Developer Portal → OAuth2 → URL Generator →
+scopes `bot`, permissions `Send Messages` + `Read Message History` + `Add
+Reactions`. Open the generated URL and pick your server.
+
+---
+
+## 2. Install
+
+```bash
+bash scripts/install.sh
+```
+
+This installs liquidsoap, ffmpeg and a Python venv, installs Piper, downloads
+the `en_US-amy-medium` voice into `voices/`, and writes
+`config/config.local.yaml` pointing at it.
+
+It is safe to re-run.
+
+> **If Piper won't run on this CPU:** the Celeron N2840 has no AVX, and some
+> onnxruntime builds fault on such CPUs. `doctor` (step 4) will tell you. If it
+> fails, set `tts.engine: espeak` in `config/config.local.yaml` — robotic, but
+> it runs on anything, and the station still works. You can also set
+> `tts.engine: none` for music with no patter at all.
+
+---
+
+## 3. Fill in `.env`
+
+The installer copied `.env.example` to `.env`. Open it and paste in everything
+from step 1:
+
+```bash
+nano .env
+```
+
+Then regenerate the liquidsoap script so the caster.fm password lands in it:
+
+```bash
+.venv/bin/python main.py stream-config
+```
+
+That prints `liquidsoap --check: OK` if the script is valid. **If it reports a
+syntax error, stop here and fix it** — the message names the line.
+
+---
+
+## 4. Check everything
+
+```bash
+.venv/bin/python main.py doctor
+```
+
+Every line should be `OK`, with warnings only for things you deliberately
+skipped. It makes a real Last.fm call and a real LLM call, so this catches a
+bad key immediately rather than at 3am.
+
+---
+
+## 5. Fill the empty library
+
+The library starts empty, so the station has nothing to play yet. Seed artists
+live in `config/config.yaml` under `discovery.seed_artists` — **edit those to
+artists you actually like first**, because everything the station discovers
+grows outward from them.
+
+```bash
+nano config/config.yaml     # discovery.seed_artists
+.venv/bin/python main.py bootstrap --count 40
+```
+
+This downloads one track at a time (deliberately — two cores). Expect roughly
+20–40 minutes for 40 tracks on a Celeron with a spinning disk. Rejected
+candidates are logged with the reason; `main.py log` shows them.
+
+Check it landed:
+
+```bash
+.venv/bin/python main.py status
+ls library/ | head
+```
+
+---
+
+## 6. Make it headless
+
+```bash
+bash scripts/headless-setup.sh
+```
+
+Lid close stops mattering, sleep is masked, the console stops blanking. Read
+the two manual steps it prints at the end (BIOS auto-power-on, and the desktop
+power settings if you run the Mint desktop rather than a console).
+
+Use the **wired ethernet**, not the old 802.11n wifi. Confirm which is in use:
+
+```bash
+ip route get 1.1.1.1
+```
+
+---
+
+## 7. Start the services
+
+```bash
+bash scripts/install-services.sh
+```
+
+Three services, deliberately independent:
+
+| Service | What it runs | If it dies |
+|---------|--------------|------------|
+| `ai-radio-stream` | liquidsoap → caster.fm | Restarts in 10s. This is the one that matters. |
+| `ai-radio-brain` | planner, TTS, downloads, queue feeder | Restarts in 15s. The stream doesn't notice. |
+| `ai-radio-bot` | Discord | Restarts in 20s. Nothing else notices. |
+
+Watch it come up:
+
+```bash
+journalctl -u ai-radio-stream -f
+```
+
+You want to see `connected to caster.fm`. Then open your caster.fm listen link
+and confirm audio.
+
+The brain needs a minute or two on first run: it plans a block and renders the
+patter before anything AI-programmed reaches the stream. Until then the safety
+playlist covers — which is exactly the behaviour you want.
+
+```bash
+journalctl -u ai-radio-brain -f
+```
+
+---
+
+## 8. Prove it never goes silent
+
+This is the one test worth doing by hand, because "never silent" is the whole
+point of the architecture.
+
+```bash
+# 1. Confirm the stream is playing AI-programmed audio.
+.venv/bin/python main.py status
+
+# 2. Kill the brain outright.
+sudo systemctl stop ai-radio-brain
+
+# 3. Drain everything the brain had queued, so only the safety tier is left.
+.venv/bin/python - <<'PY'
+from airadio.config import get_config
+from airadio.db import Database
+db = Database(get_config().db_path)
+print("dropped:", db.execute("DELETE FROM queue_items WHERE status='ready'"))
+PY
+```
+
+Keep listening. Once liquidsoap has played out the handful of items already
+pushed into it (a few minutes), the safety playlist takes over and the music
+continues with no gap. Nothing in the logs should show a disconnect.
+
+Then bring it back:
+
+```bash
+sudo systemctl start ai-radio-brain
+```
+
+Within a couple of minutes the brain plans a fresh block and normal programming
+resumes on the next track boundary.
+
+Worth also testing: `sudo systemctl stop ai-radio-stream` then start it again,
+and confirm liquidsoap reconnects to caster.fm on its own.
+
+---
+
+## Tuning it afterwards
+
+Everything lives in `config/config.yaml`, with machine-specific overrides in
+`config/config.local.yaml` (which wins). Restart the brain after editing:
+`sudo systemctl restart ai-radio-brain`.
+
+Worth knowing about:
+
+| Setting | Does what |
+|---------|-----------|
+| `dj.persona` | The DJ's whole personality. Rewrite it freely — it goes into every prompt verbatim. |
+| `dj.patter_every_n_tracks` | `1` for a chatty station, `3`–`4` for mostly music. |
+| `planner.mood_map` | Time-of-day → mood and energy band. Hour ranges must cover 0–23. |
+| `planner.buffer_minutes` | How far ahead to work. Lower = the station reacts faster; higher = more slack when things fail. |
+| `discovery.downloads_per_hour` | Library growth rate. `0`–`3` is plenty. |
+| `discovery.library_target` | Stop growing at this many tracks. `0` for no cap. |
+| `downloader.reject_title_patterns` | The junk filter. Whole-word matched, so `live` won't reject *Livewire*. |
+| `stream.liquidsoap_queue_depth` | How many items sit inside liquidsoap. Lower = mood shifts apply sooner; higher = more slack if the brain stalls. |
+
+---
+
+## Day-to-day
+
+```bash
+systemctl status ai-radio-stream ai-radio-brain ai-radio-bot
+journalctl -u ai-radio-brain -f              # what it's planning
+journalctl -u ai-radio-brain --since "1 hour ago" | grep -i reject
+.venv/bin/python main.py status              # buffer, mood, now playing
+.venv/bin/python main.py log --count 40      # download decisions and rejections
+```
+
+After updating yt-dlp (worth doing when downloads start failing — YouTube
+changes things):
+
+```bash
+.venv/bin/pip install -U yt-dlp
+sudo systemctl restart ai-radio-brain
+```
+
+---
+
+## Troubleshooting
+
+**The mount is up but silent.** The library is empty, or every file failed to
+read. `ls library/` and `main.py status`. If the library really is empty,
+liquidsoap's `mksafe` is streaming silence on purpose — that's correct
+behaviour, it's holding the mount. Run `bootstrap`.
+
+**Stream won't connect to caster.fm.** `journalctl -u ai-radio-stream -n 50`.
+Wrong password, wrong mount spelling (leading slash!), or the mount is already
+in use by an old source. caster.fm lets you kick the source from its dashboard.
+
+**No patter, only music.** TTS isn't working. `main.py doctor` names the reason,
+and `main.py tts-test "hello"` tries a single render. The station is *designed*
+to keep going in this state, so it won't shout about it.
+
+**Requests don't do anything.** Check `ai-radio-bot` is running, and that
+MESSAGE CONTENT INTENT is enabled in the Discord Developer Portal. Without it
+the bot receives your messages with the text stripped out.
+
+**Downloads all get rejected.** `main.py log` shows the reason per candidate.
+If it's `duration ... off the expected`, Last.fm's duration for that track is
+wrong; loosen `downloader.duration_tolerance`. If it's everything at once,
+update yt-dlp.
+
+**The LLM stopped answering.** Free tiers rate-limit. With both Gemini and Groq
+keys set it fails over automatically, and a rate-limited provider sits out for
+5 minutes. If both are out, the deterministic fallback planner takes over and
+the station keeps sounding like a station — you'll see
+`source=fallback` in the brain log.
+
+---
+
+## A note on the caster.fm tier
+
+Keeping a mount alive 24/7 with no source hiccup ("disable idle timeout") is a
+Cloud Plus feature on caster.fm. On the free tier the mount may be dropped if
+the source stutters. Liquidsoap reconnects automatically either way, but a
+dropped mount means a gap for the listener. Worth confirming which tier you're
+on before blaming the software for a dropout.

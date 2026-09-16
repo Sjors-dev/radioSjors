@@ -1,0 +1,186 @@
+# ===========================================================================
+# AI Radio configuration.  Secrets live in .env, everything else lives here.
+# Paths may be absolute, or relative to the project root.
+# ===========================================================================
+
+paths:
+  library: library          # music files (mp3)
+  queue: queue              # rendered patter audio
+  state: state              # sqlite db + now_playing.txt
+  logs: logs
+
+station:
+  name: "Private Radio"
+  description: "AI-programmed personal radio"
+  genre: "Various"
+  # Bitrate for the mp3 sent to caster.fm. 128 is plenty and cheap on a Celeron.
+  bitrate: 128
+  samplerate: 44100
+
+dj:
+  # Persona is injected verbatim into every LLM prompt. Rewrite freely.
+  persona: |
+    You are "Ray", the host of a small private internet radio station with
+    exactly one listener. You are warm, dry, a little wry, and you never
+    oversell. You talk like a late-night host who actually likes the music:
+    short thoughts, concrete details, no radio-cliche hype, no "coming up next
+    on the hottest hits". You never mention that you are an AI. You never
+    mention the weather, traffic, phone numbers, sponsors, or contests, because
+    this station has none of those.
+  language: english         # english | dutch  (must match the Piper voice below)
+  # A patter line is inserted before every Nth track. 1 = before every track.
+  patter_every_n_tracks: 2
+  # Always open a block with a line (time-of-day greeting / show framing).
+  patter_at_block_start: true
+  # Soft cap on patter length so Piper renders fast on a weak CPU.
+  max_patter_words: 45
+
+tts:
+  # piper_cli      -> the `piper` executable on PATH (recommended)
+  # piper_python   -> `python -m piper` from the piper-tts pip package
+  # espeak         -> espeak-ng; ugly but runs on literally any CPU
+  # none           -> disable patter entirely (music only)
+  engine: piper_cli
+  # Path to the .onnx voice model. install.sh downloads this one.
+  voice_model: /opt/ai-radio/voices/en_US-amy-medium.onnx
+  # Piper speed; 1.0 = normal, higher = slower.
+  length_scale: 1.0
+  # Normalise patter loudness to roughly match music (needs ffmpeg).
+  loudnorm: true
+  # Give up on a render after this many seconds (Celeron safety valve).
+  timeout_seconds: 180
+
+planner:
+  # Target length of one planned block, in minutes.
+  block_minutes: 60
+  # Keep at least this many minutes of ready-to-play audio queued ahead.
+  buffer_minutes: 60
+  # Don't repeat a track that played within this many hours.
+  repeat_cooldown_hours: 8
+  # Don't play the same artist twice within this many tracks.
+  artist_spacing: 4
+  # How many candidates to offer the LLM per block (keeps the prompt small).
+  candidate_pool: 60
+  # Hour ranges are [start, end) in 24h local time and must cover 0-23.
+  mood_map:
+    - hours: [0, 5]
+      name: "late night"
+      mood: "slow, hazy, nocturnal; sparse and atmospheric"
+      energy: [1, 2]
+    - hours: [5, 9]
+      name: "morning"
+      mood: "gentle, warm, waking up; nothing abrasive"
+      energy: [2, 3]
+    - hours: [9, 12]
+      name: "late morning"
+      mood: "steady and bright, good background focus music"
+      energy: [2, 4]
+    - hours: [12, 14]
+      name: "midday"
+      mood: "upbeat and easy, a lift over lunch"
+      energy: [3, 4]
+    - hours: [14, 18]
+      name: "afternoon"
+      mood: "driving and consistent, keeps momentum"
+      energy: [3, 4]
+    - hours: [18, 22]
+      name: "evening"
+      mood: "richer and more melodic, room to breathe"
+      energy: [2, 4]
+    - hours: [22, 24]
+      name: "night"
+      mood: "winding down, warmer and darker"
+      energy: [1, 3]
+
+llm:
+  # Failover order. First provider that answers wins; 429/5xx falls through.
+  providers: [gemini, groq]
+  gemini_model: gemini-2.5-flash
+  groq_model: llama-3.3-70b-versatile
+  timeout_seconds: 60
+  max_retries: 2
+
+discovery:
+  # Seeds used to bootstrap an empty library and to keep it growing.
+  # Put in artists you actually like -- everything else grows from these.
+  seed_artists:
+    - "Boards of Canada"
+    - "Khruangbin"
+    - "Radiohead"
+    - "Bonobo"
+    - "Fleetwood Mac"
+  # New tracks fetched per hour in the background.
+  downloads_per_hour: 3
+  # Stop growing once the library is this big (0 = no cap).
+  library_target: 1200
+  # Minimum tracks before the planner bothers with AI programming.
+  min_tracks_to_program: 25
+
+downloader:
+  # Accept a result only if its duration is within this fraction of the
+  # duration Last.fm reports.  Ignored when Last.fm has no duration.
+  duration_tolerance: 0.25
+  min_duration_seconds: 75
+  max_duration_seconds: 900
+  # How many yt-dlp search results to consider per track.
+  search_results: 8
+  audio_quality: "0"        # yt-dlp/LAME VBR quality, 0 = best
+  # Substrings that disqualify a candidate title (case-insensitive).
+  reject_title_patterns:
+    - live
+    - concert
+    - nightcore
+    - sped up
+    - speed up
+    - slowed
+    - reverb
+    - 8d audio
+    - remix
+    - bootleg
+    - mashup
+    - cover
+    - karaoke
+    - instrumental
+    - tribute
+    - "1 hour"
+    - "one hour"
+    - "10 hours"
+    - loop
+    - full album
+    - "reaction"
+    - lyrics video
+    - mix
+    - megamix
+    - dj set
+    - extended
+    - tutorial
+  # Channels containing these get a strong preference (official audio).
+  prefer_channel_patterns:
+    - " - topic"
+    - "vevo"
+    - "official"
+
+stream:
+  # Liquidsoap's local telnet control socket. Never expose this off-box.
+  telnet_host: "127.0.0.1"
+  telnet_port: 1234
+  # How many items to keep pushed into liquidsoap's own queue.
+  liquidsoap_queue_depth: 4
+  crossfade_seconds: 2.0
+
+bot:
+  # Reply in chat when a request is accepted/queued.
+  confirm_requests: true
+  # On a vibe shift, throw away the unplayed part of the current block and
+  # plan a fresh one immediately. false = the change waits for the next hour.
+  replan_on_vibe: true
+  # Refuse to download anything longer than this for a chat request (minutes).
+  max_request_minutes: 12
+
+runner:
+  # Main loop tick, seconds.
+  tick_seconds: 5
+  # How often to consider a background download, seconds.
+  download_interval_seconds: 1200
+  # How often to re-tag untagged tracks with mood/energy via the LLM, seconds.
+  enrich_interval_seconds: 900

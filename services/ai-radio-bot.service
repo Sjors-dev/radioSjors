@@ -1,0 +1,24 @@
+[Unit]
+Description=AI Radio - Discord request bot
+Documentation=file://@PROJECT_DIR@/SETUP.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+WorkingDirectory=@PROJECT_DIR@
+ExecStart=@PROJECT_DIR@/.venv/bin/python @PROJECT_DIR@/main.py bot
+
+Restart=always
+RestartSec=20
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ai-radio-bot
+
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,30 @@
+[Unit]
+Description=AI Radio - liquidsoap streaming engine (caster.fm)
+Documentation=file://@PROJECT_DIR@/SETUP.md
+After=network-online.target
+Wants=network-online.target
+# Never give up restarting the stream.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+WorkingDirectory=@PROJECT_DIR@
+ExecStart=/usr/bin/liquidsoap @PROJECT_DIR@/stream/radio.generated.liq
+
+# The stream is the one thing that must never stay down.
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ai-radio-stream
+
+# Keep the encoder responsive even while yt-dlp and Piper are working.
+Nice=-5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=0
+
+[Install]
+WantedBy=multi-user.target

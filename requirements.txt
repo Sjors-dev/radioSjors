@@ -1,0 +1,7 @@
+# AI Radio — runtime dependencies (Python 3.11+)
+requests>=2.31
+PyYAML>=6.0
+python-dotenv>=1.0
+mutagen>=1.47
+yt-dlp>=2024.8.6
+discord.py>=2.3

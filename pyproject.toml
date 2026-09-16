@@ -1,0 +1,23 @@
+[project]
+name = "airadio"
+version = "1.0.0"
+description = "AI-programmed private internet radio station"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31",
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0",
+    "mutagen>=1.47",
+    "yt-dlp>=2024.8.6",
+    "discord.py>=2.3",
+]
+
+[project.scripts]
+airadio = "airadio.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["airadio", "airadio.brain", "airadio.bot"]

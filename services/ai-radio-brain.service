@@ -1,0 +1,29 @@
+[Unit]
+Description=AI Radio - planner, TTS renderer, downloader, queue feeder
+Documentation=file://@PROJECT_DIR@/SETUP.md
+After=network-online.target ai-radio-stream.service
+Wants=network-online.target
+# Deliberately not Requires=: the brain being up or down must not affect the
+# stream, and the stream being down must not stop the brain from planning.
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+WorkingDirectory=@PROJECT_DIR@
+ExecStart=@PROJECT_DIR@/.venv/bin/python @PROJECT_DIR@/main.py run
+
+Restart=always
+RestartSec=15
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ai-radio-brain
+
+# Heavy background work yields to the encoder on a two-core CPU.
+Nice=10
+CPUWeight=30
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

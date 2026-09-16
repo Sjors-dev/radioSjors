@@ -1,0 +1,517 @@
+"""Offline tests: everything that does not need ffmpeg, liquidsoap or a network.
+
+Run with:  python -m unittest discover -s tests -v
+"""
+
+from __future__ import annotations
+
+import shutil
+import struct
+import sys
+import tempfile
+import unittest
+import wave
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import yaml
+
+from airadio.config import Config
+from airadio.db import Database
+from airadio.discovery import LastFM
+from airadio.downloader import Downloader
+from airadio.library import Library
+from airadio.liquidsoap import annotate_uri, format_metadata, parse_metadata
+from airadio.queueing import QueueManager
+from airadio.tts import TTS
+from airadio.util import dedupe_key, normalize, safe_filename
+from airadio.brain.intent import _rules
+from airadio.brain.llm import LLM, extract_json
+from airadio.brain.planner import Planner
+
+BASE_CONFIG = yaml.safe_load((Path(__file__).resolve().parent.parent
+                              / "config" / "config.yaml").read_text(encoding="utf-8"))
+
+
+def make_wav(path: Path, seconds: float = 3.0, rate: int = 8000,
+             tone: int = 0) -> None:
+    """A real (tiny) wav file so mutagen reports a genuine duration.
+
+    `tone` varies the samples so two different tracks are never byte-identical,
+    which is what the content-hash de-duplication keys off.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(struct.pack("<h", tone % 30000) * int(rate * seconds))
+
+
+class RadioTestCase(unittest.TestCase):
+    """Builds a throwaway station in a temp dir."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="airadio-test-"))
+        data = dict(BASE_CONFIG)
+        data["tts"] = dict(data["tts"], engine="none")
+        data["paths"] = {"library": "library", "queue": "queue",
+                         "state": "state", "logs": "logs"}
+        (self.tmp / "config").mkdir(parents=True, exist_ok=True)
+        (self.tmp / "config" / "config.yaml").write_text(
+            yaml.safe_dump(data), encoding="utf-8")
+
+        self.cfg = Config.load(self.tmp / "config" / "config.yaml", root=self.tmp)
+        self.db = Database(self.cfg.db_path)
+        self.db.init()
+        self.library = Library(self.db, self.cfg.path("library"))
+        self.tts = TTS(self.cfg)
+        self.queue = QueueManager(self.cfg, self.db, self.library, self.tts)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def seed_library(self, artists: int = 6, per_artist: int = 5) -> None:
+        for a in range(artists):
+            for t in range(per_artist):
+                make_wav(self.cfg.path("library") / f"Artist {a} - Track {t}.wav",
+                         seconds=3.0 + t * 0.5, tone=a * 100 + t + 1)
+        self.library.scan()
+
+
+# -- pure helpers -----------------------------------------------------------
+
+
+class TestUtil(unittest.TestCase):
+    def test_normalize_strips_decorations(self):
+        self.assertEqual(normalize("Hyperballad (Official Video)"), "hyperballad")
+        self.assertEqual(normalize("Let It Be [Remastered 2009]"), "let it be")
+
+    def test_dedupe_key_matches_variants(self):
+        self.assertEqual(
+            dedupe_key("Bjork", "Hyperballad"),
+            dedupe_key("Björk", "Hyperballad (Official Video)"),
+        )
+
+    def test_dedupe_key_separates_different_tracks(self):
+        self.assertNotEqual(dedupe_key("Queen", "One Vision"),
+                            dedupe_key("Queen", "One Year of Love"))
+
+    def test_safe_filename(self):
+        self.assertEqual(safe_filename('AC/DC: Back in Black?'),
+                         "ACDC Back in Black")
+
+
+class TestJsonExtraction(unittest.TestCase):
+    def test_plain_json(self):
+        self.assertEqual(extract_json('{"a": 1}'), {"a": 1})
+
+    def test_fenced_json(self):
+        self.assertEqual(extract_json('```json\n{"a": 2}\n```'), {"a": 2})
+
+    def test_json_with_chatter_around_it(self):
+        self.assertEqual(
+            extract_json('Sure! Here you go:\n{"items": []}\nHope that helps.'),
+            {"items": []})
+
+    def test_garbage_returns_none(self):
+        self.assertIsNone(extract_json("no json here at all"))
+
+
+class FakeResponse:
+    def __init__(self, status_code: int, payload: dict | None = None):
+        self.status_code = status_code
+        self._payload = payload or {}
+        self.text = str(payload)
+
+    def json(self) -> dict:
+        return self._payload
+
+
+GEMINI_OK = {"candidates": [{"content": {"parts": [{"text": "from gemini"}]}}]}
+GROQ_OK = {"choices": [{"message": {"content": "from groq"}}]}
+
+
+class TestLLMFailover(unittest.TestCase):
+    """The failover path, which cannot be exercised against the live free tiers."""
+
+    def setUp(self):
+        import os
+
+        self._saved = {k: os.environ.get(k) for k in ("GEMINI_API_KEY", "GROQ_API_KEY")}
+        os.environ["GEMINI_API_KEY"] = "gem-test"
+        os.environ["GROQ_API_KEY"] = "groq-test"
+        data = dict(BASE_CONFIG)
+        data["llm"] = dict(data["llm"], max_retries=0)
+        self.llm = LLM(Config(data, Path(".")))
+        self.calls: list[str] = []
+
+    def tearDown(self):
+        import os
+
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _responder(self, gemini, groq):
+        def post(url, **kwargs):
+            if "googleapis" in url:
+                self.calls.append("gemini")
+                return gemini
+            self.calls.append("groq")
+            return groq
+        return post
+
+    def test_gemini_answers_first(self):
+        self.llm._session.post = self._responder(
+            FakeResponse(200, GEMINI_OK), FakeResponse(200, GROQ_OK))
+        self.assertEqual(self.llm.complete("s", "u"), "from gemini")
+        self.assertEqual(self.calls, ["gemini"])
+
+    def test_rate_limited_gemini_falls_through_to_groq(self):
+        self.llm._session.post = self._responder(
+            FakeResponse(429, {"error": "quota"}), FakeResponse(200, GROQ_OK))
+        self.assertEqual(self.llm.complete("s", "u"), "from groq")
+        self.assertEqual(self.calls, ["gemini", "groq"])
+
+    def test_rate_limited_provider_is_skipped_next_time(self):
+        self.llm._session.post = self._responder(
+            FakeResponse(429, {"error": "quota"}), FakeResponse(200, GROQ_OK))
+        self.llm.complete("s", "u")
+        self.calls.clear()
+        self.llm.complete("s", "u")
+        self.assertEqual(self.calls, ["groq"], "cooling-down provider was retried")
+
+    def test_server_error_falls_through(self):
+        self.llm._session.post = self._responder(
+            FakeResponse(503, {"error": "down"}), FakeResponse(200, GROQ_OK))
+        self.assertEqual(self.llm.complete("s", "u"), "from groq")
+
+    def test_both_down_raises_so_the_caller_can_degrade(self):
+        from airadio.brain.llm import LLMUnavailable
+
+        self.llm._session.post = self._responder(
+            FakeResponse(500, {}), FakeResponse(500, {}))
+        with self.assertRaises(LLMUnavailable):
+            self.llm.complete("s", "u")
+
+    def test_complete_json_parses_a_fenced_reply(self):
+        payload = {"candidates": [{"content": {"parts":
+                  [{"text": '```json\n{"items": [1, 2]}\n```'}]}}]}
+        self.llm._session.post = self._responder(
+            FakeResponse(200, payload), FakeResponse(200, GROQ_OK))
+        self.assertEqual(self.llm.complete_json("s", "u"), {"items": [1, 2]})
+
+    def test_no_keys_means_disabled(self):
+        import os
+
+        os.environ.pop("GEMINI_API_KEY", None)
+        os.environ.pop("GROQ_API_KEY", None)
+        self.assertFalse(LLM(Config(BASE_CONFIG, Path("."))).enabled)
+
+
+class TestMetadataParsing(unittest.TestCase):
+    def test_parses_newest_block(self):
+        response = ('--- 1 ---\nartist="Khruangbin"\ntitle="August 10"\n'
+                    '--- 2 ---\nartist="Old"\ntitle="Older"')
+        self.assertEqual(format_metadata(parse_metadata(response)),
+                         "Khruangbin - August 10")
+
+    def test_falls_back_to_filename(self):
+        meta = parse_metadata('--- 1 ---\nfilename="/music/Foo - Bar.mp3"')
+        self.assertEqual(format_metadata(meta), "Foo - Bar")
+
+    def test_annotate_uri_escapes_quotes_and_colons(self):
+        uri = annotate_uri("/music/x.mp3", title='He said "hi": ok', artist="A")
+        self.assertTrue(uri.startswith("annotate:"))
+        self.assertIn("title=\"He said 'hi' - ok\"", uri)
+        self.assertTrue(uri.endswith("x.mp3"))
+
+
+class TestIntentRules(unittest.TestCase):
+    def test_play_with_artist(self):
+        result = _rules("play bohemian rhapsody by queen")
+        self.assertEqual(result["kind"], "track")
+        self.assertEqual(result["artist"].lower(), "queen")
+        self.assertEqual(result["title"].lower(), "bohemian rhapsody")
+
+    def test_play_without_artist(self):
+        result = _rules("play teardrop")
+        self.assertEqual(result["kind"], "track")
+        self.assertEqual(result["artist"], "")
+
+    def test_vibe_shift(self):
+        self.assertEqual(_rules("make it darker")["kind"], "vibe")
+
+    def test_question(self):
+        self.assertEqual(_rules("what's playing?")["kind"], "question")
+
+
+class TestConfig(unittest.TestCase):
+    def test_mood_map_covers_every_hour(self):
+        cfg = Config(BASE_CONFIG, Path("."))
+        for hour in range(24):
+            profile = cfg.mood_for_hour(hour)
+            self.assertNotEqual(profile["name"], "default",
+                                f"hour {hour} is not covered by the mood map")
+
+
+# -- downloader quality filters ---------------------------------------------
+
+
+class TestQualityFilters(RadioTestCase):
+    def setUp(self):
+        super().setUp()
+        self.downloader = Downloader(self.cfg, self.db, self.library, LastFM(""))
+
+    def candidate(self, title: str, channel: str = "Some Channel",
+                  duration: float = 240.0) -> dict:
+        return {"id": "x", "title": title, "channel": channel, "duration": duration}
+
+    def test_rejects_live_version(self):
+        score, reason = self.downloader.score_candidate(
+            self.candidate("Song Name (Live at Wembley)"), "Band", "Song Name", 240)
+        self.assertLess(score, 0)
+        self.assertIn("live", reason)
+
+    def test_rejects_hour_long_loop(self):
+        score, _ = self.downloader.score_candidate(
+            self.candidate("Song Name [1 hour loop]", duration=3600), "Band",
+            "Song Name", 240)
+        self.assertLess(score, 0)
+
+    def test_rejects_wrong_duration(self):
+        score, reason = self.downloader.score_candidate(
+            self.candidate("Song Name", duration=600), "Band", "Song Name", 240)
+        self.assertLess(score, 0)
+        self.assertIn("off the expected", reason)
+
+    def test_accepts_topic_channel(self):
+        score, reason = self.downloader.score_candidate(
+            self.candidate("Song Name", channel="Band - Topic", duration=242),
+            "Band", "Song Name", 240)
+        self.assertEqual(reason, "ok")
+        self.assertGreater(score, 60)
+
+    def test_topic_channel_outranks_random_upload(self):
+        official, _ = self.downloader.score_candidate(
+            self.candidate("Song Name", channel="Band - Topic", duration=240),
+            "Band", "Song Name", 240)
+        random_upload, _ = self.downloader.score_candidate(
+            self.candidate("Song Name", channel="mixesdaily", duration=240),
+            "Band", "Song Name", 240)
+        self.assertGreater(official, random_upload)
+
+    def test_requested_live_track_is_not_rejected(self):
+        # "Live Forever" must survive the "live" reject pattern.
+        score, reason = self.downloader.score_candidate(
+            self.candidate("Live Forever", channel="Oasis - Topic", duration=286),
+            "Oasis", "Live Forever", 286)
+        self.assertEqual(reason, "ok")
+        self.assertGreater(score, 0)
+
+    def test_allow_remix_relaxes_the_filter(self):
+        blocked, _ = self.downloader.score_candidate(
+            self.candidate("Song Name (Remix)"), "Band", "Song Name", 240)
+        allowed, reason = self.downloader.score_candidate(
+            self.candidate("Song Name (Remix)"), "Band", "Song Name", 240,
+            allow_remix=True)
+        self.assertLess(blocked, 0)
+        self.assertEqual(reason, "ok")
+        self.assertGreaterEqual(allowed, 0)
+
+    def test_reject_patterns_match_whole_words_only(self):
+        # Substring matching used to reject these: "live" inside "Livewire",
+        # "cover" inside "Coverdale", "mix" inside "Remix".
+        for title, artist in (("Livewire", "Motley Crue"),
+                              ("Coverdale Page", "Coverdale")):
+            score, reason = self.downloader.score_candidate(
+                self.candidate(title, channel=f"{artist} - Topic", duration=240),
+                artist, title, 240)
+            self.assertEqual(reason, "ok", f"{title} was wrongly rejected")
+
+    def test_remix_is_still_rejected_by_default(self):
+        score, reason = self.downloader.score_candidate(
+            self.candidate("Song Name (Nightcore Remix)"), "Band", "Song Name", 240)
+        self.assertLess(score, 0)
+
+    def test_rejects_missing_duration(self):
+        score, reason = self.downloader.score_candidate(
+            self.candidate("Song Name", duration=None), "Band", "Song Name", 240)
+        self.assertLess(score, 0)
+        self.assertIn("duration", reason)
+
+
+# -- library ----------------------------------------------------------------
+
+
+class TestLibrary(RadioTestCase):
+    def test_scan_indexes_files(self):
+        self.seed_library(artists=3, per_artist=4)
+        self.assertEqual(self.library.count(), 12)
+
+    def test_scan_is_idempotent(self):
+        self.seed_library(artists=3, per_artist=4)
+        self.library.scan()
+        self.assertEqual(self.library.count(), 12)
+
+    def test_duplicate_file_is_skipped(self):
+        self.seed_library(artists=1, per_artist=1)
+        source = next(self.cfg.path("library").glob("*.wav"))
+        shutil.copyfile(source, source.with_name("Artist 0 - Track 0 (copy).wav"))
+        self.library.scan()
+        self.assertEqual(self.library.count(), 1)
+
+    def test_missing_file_is_marked(self):
+        self.seed_library(artists=1, per_artist=2)
+        next(self.cfg.path("library").glob("*.wav")).unlink()
+        self.library.scan()
+        self.assertEqual(self.library.count(), 1)
+
+    def test_loose_find(self):
+        self.seed_library(artists=2, per_artist=2)
+        self.assertIsNotNone(self.library.find("artist 1 track 0"))
+        self.assertIsNone(self.library.find("something that is not there"))
+
+
+# -- planner ----------------------------------------------------------------
+
+
+class TestFallbackPlanner(RadioTestCase):
+    def setUp(self):
+        super().setUp()
+        self.planner = Planner(self.cfg, self.db, self.library, LLM(self.cfg))
+
+    def test_plans_without_an_llm(self):
+        self.seed_library(artists=8, per_artist=4)
+        plan = self.planner.plan_block(datetime(2026, 1, 1, 14, 0))
+        self.assertEqual(plan["source"], "fallback")
+        songs = [i for i in plan["items"] if i["kind"] == "song"]
+        patter = [i for i in plan["items"] if i["kind"] == "patter"]
+        self.assertGreater(len(songs), 2)
+        self.assertGreater(len(patter), 0)
+
+    def test_no_duplicate_songs_in_a_block(self):
+        self.seed_library(artists=8, per_artist=4)
+        plan = self.planner.plan_block(datetime(2026, 1, 1, 14, 0))
+        ids = [i["track"]["id"] for i in plan["items"] if i["kind"] == "song"]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_artist_spacing_is_respected(self):
+        self.seed_library(artists=8, per_artist=4)
+        plan = self.planner.plan_block(datetime(2026, 1, 1, 14, 0))
+        artists = [i["track"]["artist"] for i in plan["items"] if i["kind"] == "song"]
+        spacing = int(self.cfg.get("planner.artist_spacing"))
+        for index, artist in enumerate(artists):
+            window = artists[max(0, index - spacing):index]
+            self.assertNotIn(artist, window)
+
+    def test_block_never_ends_on_patter(self):
+        self.seed_library(artists=8, per_artist=4)
+        plan = self.planner.plan_block(datetime(2026, 1, 1, 14, 0))
+        self.assertEqual(plan["items"][-1]["kind"], "song")
+
+    def test_empty_library_plans_nothing_and_does_not_crash(self):
+        plan = self.planner.plan_block(datetime(2026, 1, 1, 14, 0))
+        self.assertEqual(plan["items"], [])
+
+    def test_validate_drops_hallucinated_ids(self):
+        self.seed_library(artists=8, per_artist=4)
+        candidates = self.planner.select_candidates([1, 5], 40)
+        raw = ([{"type": "song", "id": t["id"]} for t in candidates[:6]]
+               + [{"type": "song", "id": 999999},
+                  {"type": "patter", "text": "A line."}])
+        items = self.planner._validate(raw, candidates, 6)
+        ids = [i["track"]["id"] for i in items if i["kind"] == "song"]
+        self.assertEqual(len(ids), 6)
+        self.assertNotIn(999999, ids)
+
+    def test_validate_rejects_a_mostly_invented_plan(self):
+        self.seed_library(artists=8, per_artist=4)
+        candidates = self.planner.select_candidates([1, 5], 40)
+        raw = [{"type": "song", "id": 900000 + n} for n in range(10)]
+        self.assertEqual(self.planner._validate(raw, candidates, 10), [])
+
+    def test_mood_state_round_trip(self):
+        self.planner.set_mood("darker and slower")
+        self.assertEqual(self.planner.current_mood(), "darker and slower")
+        self.planner.set_mood("")
+        self.assertEqual(self.planner.current_mood(), "")
+
+
+# -- queue ------------------------------------------------------------------
+
+
+class TestQueue(RadioTestCase):
+    def setUp(self):
+        super().setUp()
+        self.planner = Planner(self.cfg, self.db, self.library, LLM(self.cfg))
+        self.seed_library(artists=8, per_artist=4)
+
+    def test_build_block_queues_songs(self):
+        plan = self.planner.plan_block(datetime(2026, 1, 1, 14, 0))
+        queued = self.queue.build_block(plan)
+        self.assertGreater(queued, 0)
+        self.assertEqual(queued, self.queue.ready_count())
+
+    def test_patter_is_skipped_when_tts_is_off(self):
+        plan = self.planner.plan_block(datetime(2026, 1, 1, 14, 0))
+        self.queue.build_block(plan)
+        rows = self.db.query("SELECT kind FROM queue_items")
+        self.assertTrue(all(row["kind"] == "song" for row in rows))
+
+    def test_take_next_claims_items_once(self):
+        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        first = self.queue.take_next("ai", limit=2)
+        second = self.queue.take_next("ai", limit=2)
+        self.assertEqual(len(first), 2)
+        self.assertEqual(len(second), 2)
+        self.assertFalse({i["id"] for i in first} & {i["id"] for i in second})
+
+    def test_take_next_marks_tracks_played(self):
+        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        item = self.queue.take_next("ai", limit=1)[0]
+        row = self.db.one("SELECT play_count, last_played_at FROM tracks WHERE id=?",
+                          (item["track_id"],))
+        self.assertEqual(row["play_count"], 1)
+        self.assertIsNotNone(row["last_played_at"])
+
+    def test_take_next_drops_vanished_files(self):
+        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        row = self.db.one("SELECT id, path FROM queue_items ORDER BY seq LIMIT 1")
+        Path(row["path"]).unlink()
+        claimed = self.queue.take_next("ai", limit=1)
+        self.assertNotEqual(claimed[0]["id"] if claimed else None, row["id"])
+        after = self.db.one("SELECT status FROM queue_items WHERE id=?", (row["id"],))
+        self.assertEqual(after["status"], "failed")
+
+    def test_requests_are_a_separate_tier(self):
+        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        track = dict(self.db.one("SELECT * FROM tracks LIMIT 1"))
+        self.queue.enqueue_request(track)
+        self.assertEqual(len(self.queue.take_next("request", limit=5)), 1)
+
+    def test_needs_block_flips_once_the_buffer_is_full(self):
+        self.assertTrue(self.queue.needs_block())
+        self.db.execute(
+            "INSERT INTO queue_items(seq, kind, tier, path, duration, status, "
+            "created_at) VALUES(1,'song','ai','x.mp3',99999,'ready',0)")
+        self.assertFalse(self.queue.needs_block())
+
+    def test_clear_pending_only_drops_unplayed(self):
+        self.queue.build_block(self.planner.plan_block(datetime(2026, 1, 1, 14, 0)))
+        self.queue.take_next("ai", limit=2)
+        before = self.db.one("SELECT COUNT(*) AS n FROM queue_items")["n"]
+        self.queue.clear_pending("ai")
+        after = self.db.one(
+            "SELECT COUNT(*) AS n FROM queue_items WHERE status='pushed'")["n"]
+        self.assertEqual(after, 2)
+        self.assertLess(after, before)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,82 @@
+#!/usr/bin/env liquidsoap
+# ===========================================================================
+# AI Radio -- streaming engine.
+#
+# GENERATED FILE.  Do not edit stream/radio.generated.liq by hand; edit this
+# template and re-run:  airadio stream-config
+#
+# Written against Liquidsoap 2.2.x (what Ubuntu 24.04 / Mint 22.2 ships).
+#
+# Three tiers, highest priority first:
+#   1. reqqueue  -- tracks the listener asked for in chat
+#   2. aiqueue   -- the AI-planned hour of patter and songs
+#   3. safety    -- plain shuffle of the whole library
+# and mksafe underneath all of it, so the mount never drops even if every
+# tier is empty.  Python pushes into the two queues over telnet; it never
+# sits in the audio path, so a dead brain cannot stop the music.
+# ===========================================================================
+
+settings.log.stdout := true
+settings.log.file := false
+settings.log.level := 3
+
+# Local control socket. Never expose this off the box.
+settings.server.telnet := true
+settings.server.telnet.bind_addr := "@TELNET_HOST@"
+settings.server.telnet.port := @TELNET_PORT@
+
+settings.frame.audio.samplerate := @SAMPLERATE@
+
+# --- sources ---------------------------------------------------------------
+
+# Tier 1: chat requests. track_sensitive below means these cut in at the end
+# of the current track rather than chopping it off.
+reqqueue = request.queue(id="reqqueue")
+
+# Tier 2: the planned block (patter and songs, already rendered to disk).
+aiqueue = request.queue(id="aiqueue")
+
+# Tier 3: the whole library on shuffle. This is the never-silent guarantee:
+# it needs no Python, no network and no AI, only files on disk.
+# Rescanned every 10 minutes so background downloads join the rotation without
+# a restart. (reload_mode="watch" is snappier but depends on inotify; seconds
+# works everywhere.)
+safety = playlist(
+  id="safety",
+  mode="randomize",
+  reload=600,
+  reload_mode="seconds",
+  "@LIBRARY_DIR@"
+)
+
+radio = fallback(id="tiers", track_sensitive=true, [reqqueue, aiqueue, safety])
+radio = crossfade(duration=@CROSSFADE@, radio)
+
+# Last line of defence: if even the library is empty or unreadable, stream
+# silence rather than dropping the connection to caster.fm.
+radio = mksafe(radio)
+
+# --- output ----------------------------------------------------------------
+
+output.icecast(
+  %mp3(bitrate=@BITRATE@, samplerate=@SAMPLERATE@, stereo=true),
+  id="caster",
+  host="@ICECAST_HOST@",
+  port=@ICECAST_PORT@,
+  mount="@ICECAST_MOUNT@",
+  user="@ICECAST_USER@",
+  password="@ICECAST_PASSWORD@",
+  name="@STATION_NAME@",
+  description="@STATION_DESC@",
+  genre="@STATION_GENRE@",
+  public=false,
+  encoding="UTF-8",
+  # Auto-reconnect: caster.fm drops happen, this makes them a non-event.
+  on_error=fun(_) -> begin
+    log(label="caster", "icecast error, reconnecting in 10s")
+    10.
+  end,
+  on_connect=fun() -> log(label="caster", "connected to caster.fm"),
+  on_disconnect=fun() -> log(label="caster", "disconnected from caster.fm"),
+  radio
+)
