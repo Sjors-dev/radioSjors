@@ -218,6 +218,8 @@ Worth knowing about:
 | `dj.patter_every_n_tracks` | `1` for a chatty station, `3`–`4` for mostly music. |
 | `planner.mood_map` | Time-of-day → mood and energy band. Hour ranges must cover 0–23. |
 | `planner.buffer_minutes` | How far ahead to work. Lower = the station reacts faster; higher = more slack when things fail. |
+| `llm.gemini_model` / `llm.groq_model` | Which model each provider uses. Both retire models regularly — the provider's own `/models` endpoint is the source of truth. |
+| `llm.max_tokens` | Completion budget per job. Reasoning models spend part of it thinking, so an empty reply means this is too low, not that the model had nothing to say. |
 | `discovery.downloads_per_hour` | Library growth rate. `0`–`3` is plenty. |
 | `discovery.library_target` | Stop growing at this many tracks. `0` for no cap. |
 | `downloader.reject_title_patterns` | The junk filter. Whole-word matched, so `live` won't reject *Livewire*. |

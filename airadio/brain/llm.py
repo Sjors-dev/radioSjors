@@ -28,6 +28,17 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 # How long a provider sits out after a rate limit before we try it again.
 COOLDOWN_SECONDS = 300.0
 
+# Completion budgets per job, overridable under llm.max_tokens in config.yaml.
+# These are deliberately generous: reasoning models (Gemini 3.x, gpt-oss) spend
+# part of the budget thinking before a single character of answer comes out, so
+# a budget that looks ample for the visible reply returns an empty string.
+DEFAULT_BUDGETS = {
+    "plan": 8000,      # a full hour of running order plus every patter line
+    "tag": 6000,       # mood/energy labels for a batch of tracks
+    "intent": 2048,    # one short chat classification
+    "probe": 2048,     # the doctor command's liveness check
+}
+
 
 class LLMUnavailable(RuntimeError):
     """Raised when every configured provider failed. Callers must degrade."""
@@ -43,6 +54,17 @@ class LLM:
         self.groq_model = str(cfg.get("llm.groq_model", "llama-3.3-70b-versatile"))
         self._cooldown: dict[str, float] = {}
         self._session = requests.Session()
+
+        self._budgets = dict(DEFAULT_BUDGETS)
+        for name, value in (cfg.get("llm.max_tokens") or {}).items():
+            try:
+                self._budgets[str(name)] = int(value)
+            except (TypeError, ValueError):
+                log.warning("ignoring non-numeric llm.max_tokens.%s: %r", name, value)
+
+    def budget(self, job: str) -> int:
+        """Completion token budget for a named job."""
+        return int(self._budgets.get(job, 4096))
 
     # -- keys ---------------------------------------------------------------
 
@@ -64,7 +86,7 @@ class LLM:
     # -- public API ---------------------------------------------------------
 
     def complete(self, system: str, user: str, json_mode: bool = False,
-                 temperature: float = 0.8, max_tokens: int = 2048) -> str:
+                 temperature: float = 0.8, max_tokens: int = 4096) -> str:
         """Ask the first working provider. Raises LLMUnavailable if all fail."""
         now = time.time()
         errors: list[str] = []
@@ -116,7 +138,7 @@ class LLM:
         raise LLMUnavailable("; ".join(errors) or "no providers configured")
 
     def complete_json(self, system: str, user: str, temperature: float = 0.8,
-                      max_tokens: int = 2048) -> dict:
+                      max_tokens: int = 4096) -> dict:
         """Same as complete(), but insists on a JSON object coming back."""
         raw = self.complete(system, user, json_mode=True,
                             temperature=temperature, max_tokens=max_tokens)
@@ -152,7 +174,17 @@ class LLM:
             feedback = data.get("promptFeedback") or {}
             raise _Retryable(f"no candidates ({feedback})")
         parts = ((candidates[0].get("content") or {}).get("parts") or [])
-        return "".join(part.get("text", "") for part in parts).strip()
+        text = "".join(part.get("text", "") for part in parts).strip()
+        if not text:
+            # Reasoning models spend the budget on thinking first, so an
+            # empty reply usually means max_tokens was too small, not that
+            # the model had nothing to say.
+            reason = candidates[0].get("finishReason", "unknown")
+            raise _Retryable(
+                f"empty reply (finishReason={reason}); if this is MAX_TOKENS "
+                f"the token budget of {max_tokens} is too small for a "
+                f"reasoning model")
+        return text
 
     def _call_groq(self, key: str, system: str, user: str, json_mode: bool,
                    temperature: float, max_tokens: int) -> str:
@@ -179,7 +211,14 @@ class LLM:
         choices = data.get("choices") or []
         if not choices:
             raise _Retryable("no choices returned")
-        return (choices[0].get("message") or {}).get("content", "").strip()
+        text = (choices[0].get("message") or {}).get("content", "").strip()
+        if not text:
+            reason = choices[0].get("finish_reason", "unknown")
+            raise _Retryable(
+                f"empty reply (finish_reason={reason}); if this is 'length' "
+                f"the token budget of {max_tokens} is too small for a "
+                f"reasoning model")
+        return text
 
     @staticmethod
     def _raise_for_status(provider: str, response: requests.Response) -> None:

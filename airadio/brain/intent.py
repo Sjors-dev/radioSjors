@@ -40,7 +40,7 @@ def classify(llm: LLM, text: str) -> dict:
     if llm.enabled:
         try:
             data = llm.complete_json(INTENT_SYSTEM, text, temperature=0.3,
-                                     max_tokens=300)
+                                     max_tokens=llm.budget("intent"))
             result = _normalize(data)
             if result:
                 result["source"] = "llm"

@@ -65,32 +65,32 @@ planner:
   mood_map:
     - hours: [0, 5]
       name: "late night"
-      mood: "slow, hazy, nocturnal; sparse and atmospheric"
+      mood: "slow, Atmospheric rap: just some rap music to vibe on. Nothing too hard or rage rap like"
       energy: [1, 2]
-    - hours: [5, 9]
+    - hours: [5, 10]
       name: "morning"
-      mood: "gentle, warm, waking up; nothing abrasive"
+      mood: "Soft Rock music. think smashing pumpkins, radiohead, and other artists like this. Nothing too hard, just some morning tunes."
       energy: [2, 3]
     - hours: [9, 12]
       name: "late morning"
-      mood: "steady and bright, good background focus music"
+      mood: "Chill Rap to focus/study too. Think Kanye West, Kendrick lamar, Lil Yachty, and other artists like this. Music that gives you focus but still gives that morning chill."
       energy: [2, 4]
     - hours: [12, 14]
       name: "midday"
-      mood: "upbeat and easy, a lift over lunch"
+      mood: "Upbeat hard rap. This should give me energy to go through to the day. Make me bop my head. Can be quite energetic "
       energy: [3, 4]
-    - hours: [14, 18]
+    - hours: [14, 16]
       name: "afternoon"
-      mood: "driving and consistent, keeps momentum"
+      mood: "Upbeat hard rap. This should give me energy to go through to the day. Make me bop my head. Can be quite energetic"
       energy: [3, 4]
-    - hours: [18, 22]
+    - hours: [16, 20]
       name: "evening"
-      mood: "richer and more melodic, room to breathe"
+      mood: "Jazz music to relax too. This can be quite slow viby jazz music. I want to hear this after a long day"
       energy: [2, 4]
-    - hours: [22, 24]
+    - hours: [20, 24]
       name: "night"
-      mood: "winding down, warmer and darker"
-      energy: [1, 3]
+      mood: "Nightly viby Rap music. Make it Atmospheric, night vibes. Can be a little energetic"
+      energy: [2, 3]
 
 llm:
   # Failover order. First provider that answers wins; 429/5xx falls through.
@@ -99,16 +99,38 @@ llm:
   groq_model: llama-3.3-70b-versatile
   timeout_seconds: 60
   max_retries: 2
+  # Completion token budgets per job.
+  # Reasoning models (Gemini 3.x, Groq's gpt-oss) burn part of this on thinking
+  # before any text is produced, so a budget that looks generous for the visible
+  # answer can come back completely empty. If you see "empty reply
+  # (finishReason=MAX_TOKENS)" in the logs, raise the matching number here.
+  max_tokens:
+    plan: 8000       # the hourly running order plus all its patter
+    tag: 6000        # mood/energy labelling of new tracks
+    intent: 2048     # classifying one chat message
+    probe: 2048      # the liveness check in `main.py doctor`
 
 discovery:
   # Seeds used to bootstrap an empty library and to keep it growing.
   # Put in artists you actually like -- everything else grows from these.
   seed_artists:
-    - "Boards of Canada"
-    - "Khruangbin"
-    - "Radiohead"
-    - "Bonobo"
-    - "Fleetwood Mac"
+    - "Travis Scott"
+    - "Kanye West"
+    - "Kendrick Lamar"
+    - "Yeat"
+    - "Playboi Carti"
+    - "Don Toliver"
+    - "Lil Yachty"
+    - "A$AP Rocky"
+    - "MF DOOM"
+    - "Sor"
+    - "The Smashing Pumpkins"
+    - "RadioHead"
+    - "Foo Fighters"
+    - "Nirvana"
+    - "The Cure"
+    - "Louis Armstrong"
+    - ""
   # New tracks fetched per hour in the background.
   downloads_per_hour: 3
   # Stop growing once the library is this big (0 = no cap).

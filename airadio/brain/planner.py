@@ -156,7 +156,7 @@ class Planner:
         )
 
         data = self.llm.complete_json(system, user, temperature=0.85,
-                                      max_tokens=3000)
+                                      max_tokens=self.llm.budget("plan"))
         items = self._validate(data.get("items") or [], candidates, track_count)
 
         return {
@@ -279,7 +279,8 @@ class Planner:
         try:
             data = self.llm.complete_json(TAGGER_SYSTEM,
                                           TAGGER_USER.format(tracks=listing),
-                                          temperature=0.2, max_tokens=1500)
+                                          temperature=0.2,
+                                          max_tokens=self.llm.budget("tag"))
         except LLMUnavailable as exc:
             log.info("track enrichment skipped: %s", exc)
             return 0

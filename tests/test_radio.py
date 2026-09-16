@@ -206,6 +206,44 @@ class TestLLMFailover(unittest.TestCase):
             FakeResponse(200, payload), FakeResponse(200, GROQ_OK))
         self.assertEqual(self.llm.complete_json("s", "u"), {"items": [1, 2]})
 
+    def test_budgets_come_from_config(self):
+        data = dict(BASE_CONFIG)
+        data["llm"] = dict(data["llm"], max_tokens={"plan": 12345})
+        llm = LLM(Config(data, Path(".")))
+        self.assertEqual(llm.budget("plan"), 12345)
+        self.assertEqual(llm.budget("intent"), 2048, "defaults should survive")
+        self.assertEqual(llm.budget("nonsense"), 4096, "unknown job needs a floor")
+
+    def test_bad_budget_value_is_ignored_not_fatal(self):
+        data = dict(BASE_CONFIG)
+        data["llm"] = dict(data["llm"], max_tokens={"plan": "lots"})
+        self.assertEqual(LLM(Config(data, Path("."))).budget("plan"), 8000)
+
+    def test_budget_is_actually_sent_to_the_provider(self):
+        sent = {}
+
+        def post(url, **kwargs):
+            sent.update(kwargs.get("json") or {})
+            return FakeResponse(200, GROQ_OK)
+
+        data = dict(BASE_CONFIG)
+        data["llm"] = dict(data["llm"], providers=["groq"], max_tokens={"plan": 7777})
+        llm = LLM(Config(data, Path(".")))
+        llm._session.post = post
+        llm.complete("s", "u", max_tokens=llm.budget("plan"))
+        self.assertEqual(sent.get("max_tokens"), 7777)
+
+    def test_empty_reply_reports_the_finish_reason(self):
+        from airadio.brain.llm import LLMUnavailable
+
+        truncated = {"candidates": [{"content": {"parts": [{"text": ""}]},
+                                     "finishReason": "MAX_TOKENS"}]}
+        self.llm._session.post = self._responder(
+            FakeResponse(200, truncated), FakeResponse(500, {}))
+        with self.assertRaises(LLMUnavailable) as caught:
+            self.llm.complete("s", "u")
+        self.assertIn("MAX_TOKENS", str(caught.exception))
+
     def test_no_keys_means_disabled(self):
         import os
 
