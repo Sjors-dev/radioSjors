@@ -5,7 +5,9 @@ Run with:  python -m unittest discover -s tests -v
 
 from __future__ import annotations
 
+import json
 import shutil
+import sqlite3
 import struct
 import sys
 import tempfile
@@ -25,12 +27,15 @@ from airadio.discovery import LastFM
 from airadio.downloader import Downloader
 from airadio.library import Library
 from airadio.liquidsoap import annotate_uri, format_metadata, parse_metadata
+from airadio.publisher import SitePublisher
 from airadio.queueing import QueueManager
 from airadio.tts import TTS
 from airadio.util import dedupe_key, normalize, safe_filename
+from airadio.weather import Weather
 from airadio.brain.intent import _rules
 from airadio.brain.llm import LLM, extract_json
-from airadio.brain.planner import Planner
+from airadio.brain.planner import (Planner, _clean_exchange, _spoken_number,
+                                   _template_weather)
 
 BASE_CONFIG = yaml.safe_load((Path(__file__).resolve().parent.parent
                               / "config" / "config.yaml").read_text(encoding="utf-8"))
@@ -1147,7 +1152,7 @@ class TestQueue(RadioTestCase):
         self.build_raw()
         pending = self.db.query("SELECT * FROM queue_items WHERE status='pending'")
         self.assertGreater(len(pending), 0)
-        self.assertTrue(all(row["kind"] == "patter" for row in pending))
+        self.assertTrue(all(row["kind"] in ("patter", "banter") for row in pending))
         self.assertTrue(all(row["path"] is None for row in pending))
 
     def test_failed_patter_is_dropped_not_left_blocking(self):
@@ -1277,6 +1282,446 @@ class TestQueue(RadioTestCase):
             "SELECT COUNT(*) AS n FROM queue_items WHERE status='pushed'")["n"]
         self.assertEqual(after, 2)
         self.assertLess(after, before)
+
+
+# -- weather ----------------------------------------------------------------
+
+
+class FakeWeather:
+    """Stands in for Open-Meteo. No test is allowed to touch the network."""
+
+    def __init__(self, reading: dict | None = None):
+        self.enabled = reading is not None
+        self._reading = reading
+
+    def current(self, force: bool = False) -> dict | None:
+        return self._reading
+
+    def briefing(self, include_outlook: bool = True) -> str:
+        if not self._reading:
+            return ""
+        line = (f"Weather in {self._reading['place']} right now: "
+                f"{self._reading['temp_c']} degrees Celsius.")
+        if include_outlook:
+            line += f" Later a high of {self._reading['high_c']}."
+        return line
+
+
+SAMPLE_READING = {
+    "place": "Eindhoven", "temp_c": 11, "feels_c": 9, "condition": "light rain",
+    "wind_kmh": 30, "is_day": True, "high_c": 14, "low_c": 7,
+    "today": "showers", "rain_chance": 70, "fetched_at": 0.0,
+}
+
+
+class TestWeather(unittest.TestCase):
+    def test_disabled_weather_reports_nothing(self):
+        cfg = Config({"weather": {"enabled": False}}, Path("."))
+        self.assertIsNone(Weather(cfg).current())
+        self.assertEqual(Weather(cfg).briefing(), "")
+
+    def test_briefing_is_built_from_a_reading(self):
+        cfg = Config({"weather": {"enabled": True}}, Path("."))
+        weather = Weather(cfg)
+        weather._cache = dict(SAMPLE_READING)
+        weather._cached_at = time.time()
+        brief = weather.briefing()
+        self.assertIn("Eindhoven", brief)
+        self.assertIn("11 degrees", brief)
+        self.assertIn("light rain", brief)
+        # Ten degrees of wind chill is worth saying; two degrees is not.
+        self.assertNotIn("feels like", brief)
+        self.assertIn("70 percent", brief)
+
+    def test_briefing_can_leave_out_the_day_ahead(self):
+        cfg = Config({"weather": {"enabled": True}}, Path("."))
+        weather = Weather(cfg)
+        weather._cache = dict(SAMPLE_READING)
+        weather._cached_at = time.time()
+        self.assertNotIn("high of", weather.briefing(include_outlook=False))
+
+    def test_a_failed_fetch_keeps_serving_the_last_reading(self):
+        cfg = Config({"weather": {"enabled": True}}, Path("."))
+        weather = Weather(cfg)
+        weather._cache = dict(SAMPLE_READING)
+        weather._cached_at = 0.0          # stale, so a refresh is due
+        weather._fetch = lambda: None     # and the refresh fails
+        self.assertEqual(weather.current()["temp_c"], 11)
+        self.assertGreater(weather._quiet_until, time.time())
+
+    def test_spoken_numbers_are_words(self):
+        self.assertEqual(_spoken_number(11), "eleven")
+        self.assertEqual(_spoken_number(21), "twenty one")
+        self.assertEqual(_spoken_number(-3), "minus three")
+        self.assertEqual(_spoken_number(100), "a hundred")
+        self.assertEqual(_spoken_number(None), "")
+
+    def test_template_weather_line_has_no_digits(self):
+        line = _template_weather(SAMPLE_READING, outlook=True)
+        self.assertNotRegex(line, r"[0-9]")
+        self.assertIn("Eindhoven", line)
+        self.assertIn("eleven degrees", line)
+
+    def test_template_weather_survives_a_missing_reading(self):
+        self.assertEqual(_template_weather(None), "")
+        self.assertEqual(_template_weather({"place": "x"}), "")
+
+
+# -- two hosts --------------------------------------------------------------
+
+
+class TestHostsAndSegments(RadioTestCase):
+    def setUp(self):
+        super().setUp()
+        self.planner = Planner(self.cfg, self.db, self.library, LLM(self.cfg),
+                               FakeWeather(dict(SAMPLE_READING)))
+
+    def _segments(self, **overrides):
+        """Rewrite dj.segments in place for a deterministic roll."""
+        self.cfg._data["dj"] = dict(self.cfg._data["dj"])
+        self.cfg._data["dj"]["segments"] = {
+            "banter_per_block": [0, 0], "banter_turns": [4, 4],
+            "music_notes_per_block": [0, 0], "weather_chance": 0.0,
+            "weather_outlook_hours": [5, 11], **overrides}
+
+    def test_hosts_come_from_config(self):
+        self.assertEqual(self.planner.host_names(), ["Ray", "Nina"])
+
+    def test_a_host_with_no_voice_is_left_out_of_the_show(self):
+        # The whole point: a line written for Nina but rendered in Ray's voice
+        # would sound like one person having an argument with themselves.
+        self.assertEqual(self.planner.host_names(["Ray"]), ["Ray"])
+
+    def test_host_names_never_comes_back_empty(self):
+        self.assertEqual(self.planner.host_names(["Nobody"]), ["Ray"])
+
+    def test_quiet_hour_asks_for_nothing_extra(self):
+        self._segments()
+        brief = self.planner.segment_brief(datetime(2026, 1, 1, 14, 0),
+                                           ["Ray", "Nina"], True)
+        self.assertEqual(brief, {"banter": 0, "banter_turns": 4,
+                                 "music_notes": 0, "weather": ""})
+        self.assertIn("quiet one",
+                      self.planner._segment_plan_text(brief, ["Ray", "Nina"]))
+
+    def test_a_single_host_never_gets_a_conversation(self):
+        self._segments(banter_per_block=[2, 2])
+        brief = self.planner.segment_brief(datetime(2026, 1, 1, 14, 0),
+                                           ["Ray"], True)
+        self.assertEqual(brief["banter"], 0)
+
+    def test_weather_slot_follows_the_clock(self):
+        self._segments(weather_chance=1.0)
+        morning = self.planner.segment_brief(datetime(2026, 1, 1, 8, 0),
+                                             ["Ray", "Nina"], True)
+        evening = self.planner.segment_brief(datetime(2026, 1, 1, 22, 0),
+                                             ["Ray", "Nina"], True)
+        self.assertEqual(morning["weather"], "outlook")
+        self.assertEqual(evening["weather"], "now")
+
+    def test_no_weather_slot_when_there_is_no_weather(self):
+        self._segments(weather_chance=1.0)
+        brief = self.planner.segment_brief(datetime(2026, 1, 1, 8, 0),
+                                           ["Ray", "Nina"], False)
+        self.assertEqual(brief["weather"], "")
+
+    def test_weather_text_is_only_offered_when_a_slot_asked_for_it(self):
+        self.assertEqual(self.planner._weather_text({"weather": ""}), "")
+        self.assertIn("high of", self.planner._weather_text({"weather": "outlook"}))
+        self.assertNotIn("high of", self.planner._weather_text({"weather": "now"}))
+
+
+class TestBanterValidation(RadioTestCase):
+    def setUp(self):
+        super().setUp()
+        self.planner = Planner(self.cfg, self.db, self.library, LLM(self.cfg))
+        self.seed_library(artists=8, per_artist=4)
+        self.candidates = self.planner.select_candidates([1, 5], 40)
+
+    def _validate(self, extra, names=("Ray", "Nina")):
+        raw = ([{"type": "song", "id": t["id"]} for t in self.candidates[:6]]
+               + extra
+               + [{"type": "song", "id": self.candidates[6]["id"]}])
+        return self.planner._validate(raw, self.candidates, 6, list(names))
+
+    def test_a_conversation_survives_validation(self):
+        items = self._validate([{"type": "banter", "lines": [
+            {"host": "Ray", "text": "That was good."},
+            {"host": "Nina", "text": "It was. What is next?"},
+            {"host": "Ray", "text": "Something slower."}]}])
+        banter = [i for i in items if i["kind"] == "banter"]
+        self.assertEqual(len(banter), 1)
+        self.assertEqual([turn["host"] for turn in banter[0]["lines"]],
+                         ["Ray", "Nina", "Ray"])
+
+    def test_two_turns_from_one_host_are_merged_not_dropped(self):
+        turns = _clean_exchange([
+            {"host": "Ray", "text": "First thought."},
+            {"host": "Ray", "text": "Second thought."},
+            {"host": "Nina", "text": "My turn."}], ["Ray", "Nina"], 90)
+        self.assertEqual([turn["host"] for turn in turns], ["Ray", "Nina"])
+        self.assertIn("First thought", turns[0]["text"])
+        self.assertIn("Second thought", turns[0]["text"])
+
+    def test_an_invented_host_is_mapped_onto_a_real_one(self):
+        turns = _clean_exchange([
+            {"host": "Dave", "text": "Hello."},
+            {"host": "Susan", "text": "Hello back."}], ["Ray", "Nina"], 90)
+        self.assertEqual([turn["host"] for turn in turns], ["Ray", "Nina"])
+
+    def test_a_conversation_collapses_to_one_voice_when_alone(self):
+        turns = _clean_exchange([
+            {"host": "Ray", "text": "One."},
+            {"host": "Nina", "text": "Two."}], ["Ray"], 90)
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(turns[0]["host"], "Ray")
+        self.assertIn("One", turns[0]["text"])
+        self.assertIn("Two", turns[0]["text"])
+
+    def test_a_one_line_conversation_becomes_a_plain_line(self):
+        items = self._validate([{"type": "banter", "lines": [
+            {"host": "Ray", "text": "Only me tonight."}]}])
+        self.assertNotIn("banter", [i["kind"] for i in items])
+        self.assertIn("Only me tonight.",
+                      [i.get("text") for i in items if i["kind"] == "patter"])
+
+    def test_malformed_lines_do_not_crash_the_plan(self):
+        items = self._validate([{"type": "banter", "lines": "not a list"},
+                                {"type": "banter"},
+                                {"type": "banter", "lines": [None, 7]}])
+        self.assertGreater(len([i for i in items if i["kind"] == "song"]), 2)
+
+    def test_patter_keeps_the_host_it_was_written_for(self):
+        items = self._validate([{"type": "patter", "host": "Nina",
+                                 "text": "Just me for a second."}])
+        line = [i for i in items if i["kind"] == "patter"][0]
+        self.assertEqual(line["host"], "Nina")
+
+    def test_a_block_never_ends_on_a_conversation(self):
+        raw = ([{"type": "song", "id": t["id"]} for t in self.candidates[:6]]
+               + [{"type": "banter", "lines": [
+                   {"host": "Ray", "text": "Bye."},
+                   {"host": "Nina", "text": "Night."}]}])
+        items = self.planner._validate(raw, self.candidates, 6, ["Ray", "Nina"])
+        self.assertEqual(items[-1]["kind"], "song")
+
+
+class TestBanterQueueing(RadioTestCase):
+    def setUp(self):
+        super().setUp()
+        self.seed_library(artists=4, per_artist=3)
+        self.track = dict(self.db.query("SELECT * FROM tracks LIMIT 1")[0])
+
+    def _plan(self):
+        return {"items": [
+            {"kind": "patter", "host": "Ray", "text": "Evening."},
+            {"kind": "banter", "lines": [{"host": "Ray", "text": "One."},
+                                         {"host": "Nina", "text": "Two."}]},
+            {"kind": "song", "track": self.track},
+        ], "source": "test", "mood_name": "night", "show_note": ""}
+
+    def test_a_conversation_is_stored_as_a_single_row(self):
+        self.queue.build_block(self._plan())
+        rows = self.db.query("SELECT * FROM queue_items WHERE kind='banter'")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["host"], "Ray & Nina")
+        turns = json.loads(rows[0]["text"])
+        self.assertEqual([turn["host"] for turn in turns], ["Ray", "Nina"])
+
+    def test_a_plain_line_remembers_its_host(self):
+        self.queue.build_block(self._plan())
+        row = self.db.one("SELECT * FROM queue_items WHERE kind='patter'")
+        self.assertEqual(row["host"], "Ray")
+
+    def test_rendering_routes_a_conversation_to_the_exchange_renderer(self):
+        self.queue.build_block(self._plan())
+        seen = {}
+
+        def fake_exchange(lines, name_hint="banter"):
+            seen["lines"] = lines
+            return None            # a failed render is dropped, which is fine
+
+        self.queue.tts.render_exchange = fake_exchange
+        self.queue.tts.render = lambda *a, **k: None
+        while self.queue.pending_count():
+            self.queue.render_pending(limit=5)
+        self.assertEqual([turn["host"] for turn in seen["lines"]],
+                         ["Ray", "Nina"])
+
+    def test_a_corrupt_conversation_is_dropped_not_fatal(self):
+        self.queue.build_block(self._plan())
+        self.db.execute("UPDATE queue_items SET text='{not json' "
+                        "WHERE kind='banter'")
+        while self.queue.pending_count():
+            self.queue.render_pending(limit=5)
+        self.assertEqual(self.queue.pending_count(), 0)
+
+
+class TestVoiceSelection(RadioTestCase):
+    def test_the_first_host_inherits_the_station_voice(self):
+        data = dict(BASE_CONFIG)
+        data["tts"] = dict(data["tts"], engine="piper_cli",
+                           voice_model="/voices/en_US-ryan-high.onnx",
+                           length_scale=1.4)
+        cfg = Config(data, self.tmp)
+        tts = TTS(cfg)
+        self.assertEqual(tts.voices["Ray"].model,
+                         "/voices/en_US-ryan-high.onnx")
+        self.assertEqual(tts.voices["Ray"].length_scale, 1.4)
+
+    def test_the_co_host_voice_is_looked_for_beside_the_first(self):
+        data = dict(BASE_CONFIG)
+        data["tts"] = dict(data["tts"], engine="piper_cli",
+                           voice_model="/voices/en_US-ryan-high.onnx")
+        tts = TTS(Config(data, self.tmp))
+        self.assertTrue(tts.voices["Nina"].model.endswith(
+            "en_GB-jenny_dioco-medium.onnx"))
+        self.assertIn("/voices", tts.voices["Nina"].model.replace("\\", "/"))
+
+    def test_a_blank_length_scale_falls_back_to_the_station_setting(self):
+        data = dict(BASE_CONFIG)
+        data["tts"] = dict(data["tts"], length_scale=1.25)
+        tts = TTS(Config(data, self.tmp))
+        self.assertEqual(tts.voices["Nina"].length_scale, 1.25)
+
+    def test_only_hosts_with_a_model_on_disk_can_speak(self):
+        voice = self.cfg.path("state") / "en_US-ryan-high.onnx"
+        voice.write_bytes(b"not really a model, but it exists")
+        data = dict(BASE_CONFIG)
+        data["tts"] = dict(data["tts"], engine="piper_cli",
+                           voice_model=str(voice))
+        tts = TTS(Config(data, self.tmp))
+        self.assertEqual(tts.hosts, ["Ray"])
+        ok, detail = tts.check_exchange()
+        self.assertFalse(ok)
+        self.assertIn("one voice", detail)
+
+    def test_disabled_tts_has_no_speaking_hosts(self):
+        self.assertEqual(TTS(self.cfg).hosts, [])
+
+
+# -- the website feed -------------------------------------------------------
+
+
+class TestSitePublisher(RadioTestCase):
+    def setUp(self):
+        super().setUp()
+        self.seed_library(artists=3, per_artist=3)
+        self.site = SitePublisher(self.cfg, self.db, self.queue, self.library,
+                                  FakeWeather(dict(SAMPLE_READING)))
+
+    def _queue_a_block(self):
+        tracks = [dict(row) for row in self.db.query("SELECT * FROM tracks LIMIT 3")]
+        self.queue.build_block({"items": [
+            {"kind": "song", "track": tracks[0]},
+            {"kind": "banter", "lines": [{"host": "Ray", "text": "Hi."},
+                                         {"host": "Nina", "text": "Hello."}]},
+            {"kind": "song", "track": tracks[1]},
+        ], "source": "llm", "mood_name": "night", "show_note": "A quiet one."})
+        return tracks
+
+    def test_payload_has_everything_the_site_renders(self):
+        self._queue_a_block()
+        document = self.site.payload("Artist 0 - Track 0", since=123.0)
+        for key in ("updated_at", "station", "now_playing", "show", "queue",
+                    "history", "library", "weather"):
+            self.assertIn(key, document)
+        self.assertEqual(document["station"]["hosts"], ["Ray", "Nina"])
+        self.assertEqual(document["show"]["note"], "A quiet one.")
+        self.assertEqual(document["library"]["tracks"], 9)
+
+    def test_now_playing_is_split_into_fields(self):
+        self._queue_a_block()
+        current = self.site.payload("Artist 1 - Track 2", since=99.0)["now_playing"]
+        self.assertEqual(current["artist"], "Artist 1")
+        self.assertEqual(current["title"], "Track 2")
+        self.assertEqual(current["kind"], "song")
+        self.assertEqual(current["started_at"], 99.0)
+        self.assertGreater(current["duration"], 0)
+
+    def test_patter_on_air_is_labelled_not_guessed_at(self):
+        current = self.site.payload("Private Radio - Station ID")["now_playing"]
+        self.assertEqual(current["kind"], "patter")
+
+    def test_an_unknown_string_still_produces_something_showable(self):
+        current = self.site.payload("Some Bootleg - A Track")["now_playing"]
+        self.assertEqual(current["artist"], "Some Bootleg")
+        self.assertEqual(current["title"], "A Track")
+
+    def test_the_queue_shows_conversations_without_leaking_the_script(self):
+        self._queue_a_block()
+        queue = self.site.payload()["queue"]
+        talk = [item for item in queue if item["kind"] == "banter"]
+        self.assertEqual(len(talk), 1)
+        self.assertEqual(talk[0]["hosts"], "Ray & Nina")
+        # What the hosts are about to say is a spoiler, so it is not published.
+        self.assertNotIn("text", talk[0])
+
+    def test_publishing_is_off_until_it_is_configured(self):
+        self.assertFalse(self.site.enabled)
+        self.assertIn("site.enabled", self.site.why_disabled())
+        self.assertFalse(self.site.maybe_publish("Artist 0 - Track 0"))
+
+    def test_an_unchanged_station_is_not_republished(self):
+        self._queue_a_block()
+        self.site._configured = True
+        self.site.token = "x"
+        self.site.gist_id = "y"
+        sent = []
+        self.site._write = lambda document: (sent.append(document), True)[1]
+
+        self.assertTrue(self.site.maybe_publish("Artist 0 - Track 0"))
+        self.site._last_publish = 0.0          # pretend the interval elapsed
+        self.assertFalse(self.site.maybe_publish("Artist 0 - Track 0"))
+        self.site._last_publish = 0.0
+        self.assertTrue(self.site.maybe_publish("Artist 1 - Track 1"))
+        self.assertEqual(len(sent), 2)
+
+    def test_a_failed_push_backs_off_instead_of_hammering_github(self):
+        self.site._configured = True
+        self.site.token = "x"
+        self.site.gist_id = "y"
+        self.site._session.patch = _raise
+        self.assertFalse(self.site.publish_now({"a": 1}))
+        self.assertEqual(self.site._failures, 1)
+        self.assertGreater(self.site._quiet_until, time.time())
+
+
+def _raise(*args, **kwargs):
+    raise RuntimeError("github is down")
+
+
+# -- schema migration -------------------------------------------------------
+
+
+class TestMigrations(RadioTestCase):
+    def test_an_older_database_gains_the_host_column(self):
+        path = self.tmp / "state" / "old.db"
+        connection = sqlite3.connect(path)
+        connection.executescript(
+            "CREATE TABLE queue_items (id INTEGER PRIMARY KEY, block_id INTEGER,"
+            " seq INTEGER NOT NULL, kind TEXT NOT NULL, tier TEXT NOT NULL"
+            " DEFAULT 'ai', path TEXT, track_id INTEGER, text TEXT, title TEXT,"
+            " artist TEXT, duration REAL, status TEXT NOT NULL DEFAULT 'pending',"
+            " created_at REAL NOT NULL, pushed_at REAL);"
+            "INSERT INTO queue_items(seq, kind, created_at) VALUES(1,'patter',0);")
+        connection.commit()
+        connection.close()
+
+        db = Database(path)
+        db.init()
+        columns = {row["name"] for row in db.query("PRAGMA table_info(queue_items)")}
+        self.assertIn("host", columns)
+        # The row that was already there survives, with an empty host.
+        row = db.one("SELECT * FROM queue_items")
+        self.assertIsNone(row["host"])
+
+    def test_migrating_twice_is_harmless(self):
+        Database(self.cfg.db_path).init()
+        Database(self.cfg.db_path).init()
+        columns = {row["name"] for row in
+                   self.db.query("PRAGMA table_info(queue_items)")}
+        self.assertIn("host", columns)
 
 
 if __name__ == "__main__":

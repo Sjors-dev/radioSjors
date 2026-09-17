@@ -7,6 +7,7 @@ thing that must never happen is a gap.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import wave
@@ -120,16 +121,27 @@ class QueueManager:
                 queued += 1
                 songs += 1
 
-            elif item["kind"] == "patter":
-                # Recorded as 'pending' and rendered later, one line at a time,
+            elif item["kind"] in ("patter", "banter"):
+                # Recorded as 'pending' and rendered later, one item at a time,
                 # by the brain loop. Rendering a whole hour of patter inline
                 # blocks everything else -- chat requests included -- for as
                 # long as the voice takes, which on a slow CPU is minutes.
+                #
+                # A conversation is stored as one row holding every turn, so it
+                # reaches the stream as a single push. Split across rows, a
+                # song could land in the middle of it.
+                if item["kind"] == "banter":
+                    text = json.dumps(item["lines"], ensure_ascii=False)
+                    host = " & ".join(
+                        dict.fromkeys(line["host"] for line in item["lines"]))
+                else:
+                    text = item["text"]
+                    host = item.get("host") or ""
                 self.db.execute(
                     "INSERT INTO queue_items(block_id, seq, kind, tier, text, "
-                    "title, artist, duration, status, created_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
-                    (block_id, seq, "patter", "ai", item["text"],
+                    "host, title, artist, duration, status, created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (block_id, seq, item["kind"], "ai", text, host,
                      "", self.cfg.get("station.name", "Radio"),
                      0.0, "pending", time.time()),
                 )
@@ -157,7 +169,13 @@ class QueueManager:
             (limit,))
         rendered = 0
         for row in rows:
-            audio = self.tts.render(row["text"] or "", name_hint=f"b{row['block_id']}")
+            hint = f"b{row['block_id']}"
+            if row["kind"] == "banter":
+                audio = self.tts.render_exchange(_turns(row["text"]),
+                                                 name_hint=hint)
+            else:
+                audio = self.tts.render(row["text"] or "", name_hint=hint,
+                                        host=row["host"])
             if audio is None:
                 self.db.execute(
                     "UPDATE queue_items SET status='failed' WHERE id=?", (row["id"],))
@@ -219,10 +237,18 @@ class QueueManager:
                 claimed.append(dict(row))
         return claimed
 
-    def preview(self, limit: int = 8) -> list[dict]:
+    def preview(self, limit: int = 8, include_pending: bool = False) -> list[dict]:
+        """What is coming up.
+
+        `include_pending` adds items that are queued but not yet voiced. The
+        stream feeder must not see those -- it would push a file that does not
+        exist yet -- but a display wants them, because they are genuinely next.
+        """
+        statuses = ("'ready','pushed','pending'" if include_pending
+                    else "'ready','pushed'")
         rows = self.db.query(
-            "SELECT kind, tier, title, artist, text, duration FROM queue_items "
-            "WHERE status IN ('ready','pushed') ORDER BY "
+            "SELECT kind, tier, title, artist, text, host, duration FROM queue_items "
+            f"WHERE status IN ({statuses}) ORDER BY "
             "CASE tier WHEN 'request' THEN 0 ELSE 1 END, seq LIMIT ?", (limit,)
         )
         return [dict(row) for row in rows]
@@ -244,6 +270,15 @@ class QueueManager:
             "(SELECT id FROM queue_items WHERE status='done' ORDER BY id DESC LIMIT ?)",
             (keep,),
         )
+
+
+def _turns(raw: str | None) -> list[dict]:
+    """Decode a stored conversation. A malformed row is simply not spoken."""
+    try:
+        data = json.loads(raw or "[]")
+    except (ValueError, TypeError):
+        return []
+    return [turn for turn in data if isinstance(turn, dict)]
 
 
 def wav_duration(path: Path) -> float:

@@ -21,6 +21,7 @@ from ..config import Config
 from ..db import Database
 from ..library import Library
 from ..util import human_duration, normalize
+from ..weather import Weather
 from .llm import LLM, LLMUnavailable
 from .prompts import PLANNER_SYSTEM, PLANNER_USER, TAGGER_SYSTEM, TAGGER_USER
 
@@ -28,11 +29,13 @@ log = logging.getLogger("planner")
 
 
 class Planner:
-    def __init__(self, cfg: Config, db: Database, library: Library, llm: LLM):
+    def __init__(self, cfg: Config, db: Database, library: Library, llm: LLM,
+                 weather: Weather | None = None):
         self.cfg = cfg
         self.db = db
         self.library = library
         self.llm = llm
+        self.weather = weather
 
     # -- mood ---------------------------------------------------------------
 
@@ -193,10 +196,109 @@ class Planner:
         )
         return [f"{row['artist']} - {row['title']}" for row in rows]
 
+    # -- hosts and segments -------------------------------------------------
+
+    def hosts(self) -> list[dict]:
+        """Configured hosts, first one leading. Always at least one."""
+        entries = [host for host in (self.cfg.get("dj.hosts", []) or [])
+                   if isinstance(host, dict) and str(host.get("name") or "").strip()]
+        if not entries:
+            return [{"name": "the host", "character": "warm, dry, never oversells"}]
+        return entries
+
+    def host_names(self, speaking: list[str] | None = None) -> list[str]:
+        """Host names, optionally narrowed to those with a working voice.
+
+        A co-host whose voice model never got downloaded must not appear in the
+        running order: the line would be rendered in the wrong voice and the
+        conversation would sound like one person arguing with themselves.
+        """
+        names = [str(host["name"]).strip() for host in self.hosts()]
+        if speaking is None:
+            return names
+        allowed = [name for name in names if name in speaking]
+        return allowed or names[:1]
+
+    def _host_block(self, names: list[str]) -> str:
+        characters = {str(host["name"]).strip(): str(host.get("character") or "")
+                      for host in self.hosts()}
+        lines = []
+        for index, name in enumerate(names):
+            role = "leads the hour" if index == 0 else "co-hosts"
+            detail = characters.get(name, "").strip()
+            lines.append(f"- {name} {role}." + (f" {detail}" if detail else ""))
+        if len(names) == 1:
+            lines.append("- There is no co-host tonight, so never write a "
+                         "conversation: every spoken item is this one voice.")
+        return "\n".join(lines)
+
+    def segment_brief(self, airtime: datetime, names: list[str],
+                      has_weather: bool) -> dict:
+        """Decide how much the hosts talk this hour, and about what.
+
+        Rolled per block rather than fixed, because "talks more, but only
+        sometimes" is the whole point: an hour that always has exactly one
+        weather moment and exactly two chats is just a longer format, not a
+        looser one.
+        """
+        segments = self.cfg.section("dj").get("segments") or {}
+
+        banter = 0
+        turns = 0
+        if len(names) > 1:
+            banter = _roll(segments.get("banter_per_block", [0, 2]))
+            turns = max(2, _roll(segments.get("banter_turns", [4, 6])))
+        notes = _roll(segments.get("music_notes_per_block", [0, 2]))
+
+        weather = ""
+        if has_weather and random.random() < float(
+                segments.get("weather_chance", 0.5)):
+            window = segments.get("weather_outlook_hours", [5, 11])
+            try:
+                start, end = int(window[0]), int(window[1])
+            except (TypeError, ValueError, IndexError):
+                start, end = 5, 11
+            # The whole-day forecast is only useful before the day happens.
+            weather = "outlook" if start <= airtime.hour < end else "now"
+
+        return {"banter": banter, "banter_turns": turns,
+                "music_notes": notes, "weather": weather}
+
+    def _segment_plan_text(self, brief: dict, names: list[str]) -> str:
+        wants = []
+        if brief["banter"] and len(names) > 1:
+            pair = " and ".join(names[:2])
+            wants.append(
+                f"- Include {_count(brief['banter'], 'conversation')} between "
+                f"{pair}, about {brief['banter_turns']} turns each time. Put "
+                f"them where they fit the music, not at the very start.")
+        if brief["music_notes"]:
+            wants.append(
+                f"- Include {_count(brief['music_notes'], 'music note')}: a "
+                f"host saying one true, concrete thing about a record you are "
+                f"playing. If you are not sure it is true, talk about how it "
+                f"sounds instead.")
+        if brief["weather"] == "outlook":
+            wants.append("- Include exactly one weather moment, using the "
+                         "brief below, covering how the day is shaping up. "
+                         "Somewhere in the first half of the hour.")
+        elif brief["weather"] == "now":
+            wants.append("- Include exactly one weather moment, using the "
+                         "brief below. Just the conditions outside right now, "
+                         "in a sentence or two. Do not read out a forecast.")
+
+        if not wants:
+            return ("This hour is a quiet one: every spoken item is a short "
+                    "link. No conversations, no weather, no music trivia.")
+        return ("Plan for this hour, on top of the usual short links:\n"
+                + "\n".join(wants)
+                + "\nEverything else stays a short link. Do not stack these "
+                  "against each other; spread them through the hour.")
+
     # -- planning -----------------------------------------------------------
 
-    def plan_block(self, now: datetime | None = None,
-                   airs_in: float = 0.0) -> dict:
+    def plan_block(self, now: datetime | None = None, airs_in: float = 0.0,
+                   speaking_hosts: list[str] | None = None) -> dict:
         """Produce the next block. Always returns something playable.
 
         `airs_in` is how many seconds of audio are already queued ahead of this
@@ -204,6 +306,9 @@ class Planner:
         buffer is an hour deep by design: planning against the current clock
         means the time-of-day genre arrives an hour late and the DJ announces
         a time that passed before anyone heard it.
+
+        `speaking_hosts` is who actually has a voice on disk. A host that
+        cannot be rendered must not be written into the show.
         """
         now = now or datetime.now()
         airtime = now + timedelta(seconds=max(0.0, airs_in))
@@ -234,10 +339,17 @@ class Planner:
         average = _average_duration(candidates)
         track_count = max(3, min(len(candidates), round(block_minutes * 60 / average)))
 
+        names = self.host_names(speaking_hosts)
+        briefing = self.weather.briefing() if self.weather else ""
+        brief = self.segment_brief(airtime, names, bool(briefing))
+        log.info("hour brief: hosts=%s, banter=%d, music notes=%d, weather=%s",
+                 "/".join(names), brief["banter"], brief["music_notes"],
+                 brief["weather"] or "none")
+
         if self.llm.enabled and self.library.count() >= min_tracks:
             try:
                 plan = self._plan_with_llm(airtime, profile, candidates,
-                                           track_count, focus)
+                                           track_count, focus, names, brief)
                 if plan["items"]:
                     return plan
                 log.warning("LLM plan had no usable items, falling back")
@@ -247,16 +359,22 @@ class Planner:
                 log.exception("LLM planning blew up (%s), using fallback planner", exc)
 
         return self._plan_fallback(airtime, profile, candidates,
-                                   track_count, focus)
+                                   track_count, focus, names, brief)
 
     def _plan_with_llm(self, airtime: datetime, profile: dict,
                        candidates: list[dict], track_count: int,
-                       focus_artists: list[str] | None = None) -> dict:
+                       focus_artists: list[str] | None = None,
+                       names: list[str] | None = None,
+                       brief: dict | None = None) -> dict:
         """`airtime` is when the listener hears this, not when it was planned."""
         patter_every = int(self.cfg.get("dj.patter_every_n_tracks", 2))
         max_words = int(self.cfg.get("dj.max_patter_words", 45))
+        max_segment_words = int(self.cfg.get("dj.max_segment_words", 90))
         opening = bool(self.cfg.get("dj.patter_at_block_start", True))
         mood = self.current_mood()
+        names = names or self.host_names()
+        brief = brief or {"banter": 0, "banter_turns": 4, "music_notes": 0,
+                          "weather": ""}
 
         listing = "\n".join(
             "{id}. {artist} - {title}{extra}".format(
@@ -267,8 +385,13 @@ class Planner:
 
         system = PLANNER_SYSTEM.format(
             persona=self.cfg.get("dj.persona", "You are a radio DJ."),
+            host_block=self._host_block(names),
+            first_host=names[0],
+            second_host=names[1] if len(names) > 1 else names[0],
             language=self.cfg.get("dj.language", "english"),
             max_words=max_words,
+            max_segment_words=max_segment_words,
+            segment_plan=self._segment_plan_text(brief, names),
             artist_spacing=int(self.cfg.get("planner.artist_spacing", 4)),
         )
         user = PLANNER_USER.format(
@@ -278,17 +401,21 @@ class Planner:
             slot_mood=profile.get("mood", "varied"),
             mood_override=_mood_note(mood, focus_artists),
             recent=", ".join(self._recent_titles()) or "nothing yet",
+            weather_brief=(f"Weather brief (facts only, use nothing else):\n"
+                           f"{self._weather_text(brief)}\n"
+                           if brief["weather"] else ""),
             track_count=track_count,
             patter_every=patter_every,
             patter_plural="" if patter_every == 1 else "s",
-            opening_note=("Start the hour with a patter line that sets the scene."
-                          if opening else "Do not open with patter."),
+            opening_note=("Start the hour with a short link that sets the scene."
+                          if opening else "Do not open with talk."),
             candidates=listing,
         )
 
         data = self.llm.complete_json(system, user, temperature=0.85,
                                       max_tokens=self.llm.budget("plan"))
-        items = self._validate(data.get("items") or [], candidates, track_count)
+        items = self._validate(data.get("items") or [], candidates, track_count,
+                               names)
 
         return {
             "items": items,
@@ -297,11 +424,22 @@ class Planner:
             "show_note": str(data.get("show_note") or "")[:300],
         }
 
+    def _weather_text(self, brief: dict) -> str:
+        """The facts for this hour's weather moment, or nothing at all.
+
+        An hour with no weather slot must not be handed a briefing: the model
+        will use anything it is given, and then every hour has weather in it.
+        """
+        if not self.weather or not brief.get("weather"):
+            return ""
+        return self.weather.briefing(include_outlook=brief["weather"] == "outlook")
+
     def _validate(self, raw_items: list, candidates: list[dict],
-                  track_count: int) -> list[dict]:
+                  track_count: int, names: list[str] | None = None) -> list[dict]:
         """Trust nothing: drop invented ids, repeats and malformed entries."""
         by_id = {track["id"]: track for track in candidates}
-        max_words = int(self.cfg.get("dj.max_patter_words", 45))
+        max_segment_words = int(self.cfg.get("dj.max_segment_words", 90))
+        names = names or self.host_names()
         used: set[int] = set()
         items: list[dict] = []
 
@@ -328,18 +466,34 @@ class Planner:
                 used.add(track_id)
                 items.append({"kind": "song", "track": track})
 
-            elif kind == "patter":
-                text = _clean_patter(str(raw.get("text") or ""), max_words)
+            elif kind in ("patter", "link", "weather", "note"):
+                # The generous cap is the runaway guard, not the target; the
+                # prompt asks for links under max_words and only lets weather
+                # and music notes run longer.
+                text = _clean_patter(str(raw.get("text") or ""), max_segment_words)
                 if text:
-                    items.append({"kind": "patter", "text": text})
+                    items.append({"kind": "patter", "text": text,
+                                  "host": _pick_host(raw.get("host"), names, 0)})
+
+            elif kind in ("banter", "conversation", "exchange"):
+                lines = _clean_exchange(raw.get("lines"), names,
+                                        max_segment_words)
+                if len(lines) >= 2:
+                    items.append({"kind": "banter", "lines": lines})
+                elif lines:
+                    # One usable turn is not a conversation, but it is still a
+                    # line somebody can read out.
+                    items.append({"kind": "patter", "text": lines[0]["text"],
+                                  "host": lines[0]["host"]})
 
         if len(used) < max(2, track_count // 3):
             log.warning("LLM only produced %d valid songs, treating plan as failed",
                         len(used))
             return []
 
-        # Never end a block on patter: it would leave dead air pointing nowhere.
-        while items and items[-1]["kind"] == "patter":
+        # Never end a block on talk: it would leave the hosts introducing
+        # something that is not there, and then dead air.
+        while items and items[-1]["kind"] != "song":
             items.pop()
 
         self._report_artist_spacing(items)
@@ -367,7 +521,9 @@ class Planner:
 
     def _plan_fallback(self, airtime: datetime, profile: dict,
                        candidates: list[dict], track_count: int,
-                       focus_artists: list[str] | None = None) -> dict:
+                       focus_artists: list[str] | None = None,
+                       names: list[str] | None = None,
+                       brief: dict | None = None) -> dict:
         """Deterministic programming for when the LLM is down.
 
         Weighted-random picks inside the energy band with artist spacing, plus
@@ -377,6 +533,9 @@ class Planner:
         patter_every = int(self.cfg.get("dj.patter_every_n_tracks", 2))
         opening = bool(self.cfg.get("dj.patter_at_block_start", True))
         focus = {artist.lower() for artist in (focus_artists or [])}
+        names = names or self.host_names()
+        brief = brief or {"banter": 0, "banter_turns": 4, "music_notes": 0,
+                          "weather": ""}
 
         pool = list(candidates)
         random.shuffle(pool)
@@ -418,14 +577,41 @@ class Planner:
         if not chosen:
             chosen = pool[:track_count]
 
+        # Where the two extras go, if this hour has any. Kept away from the
+        # opening so the hour still starts with a normal link.
+        slots = [index for index in range(patter_every or 1, len(chosen))
+                 if patter_every > 0 and index % patter_every == 0]
+        random.shuffle(slots)
+        banter_at = set(slots[:brief["banter"]] if len(names) > 1 else [])
+        weather_at = (slots[len(banter_at)] if brief["weather"] and
+                      len(slots) > len(banter_at) else None)
+
         items: list[dict] = []
         if opening:
-            items.append({"kind": "patter",
+            items.append({"kind": "patter", "host": names[0],
                           "text": _template_opening(airtime, profile, chosen[0])})
         for index, track in enumerate(chosen):
             if index > 0 and patter_every > 0 and index % patter_every == 0:
-                items.append({"kind": "patter",
-                              "text": _template_link(chosen[index - 1], track)})
+                previous = chosen[index - 1]
+                if index in banter_at:
+                    items.append({"kind": "banter",
+                                  "lines": _template_banter(
+                                      names, previous, track,
+                                      brief["banter_turns"])})
+                elif index == weather_at and self.weather:
+                    text = _template_weather(
+                        self.weather.current(),
+                        outlook=brief["weather"] == "outlook")
+                    items.append({"kind": "patter", "host": names[0],
+                                  "text": text or _template_link(previous, track)})
+                else:
+                    # Alternate per LINK, not per track index: with a link
+                    # every second song the track index is always even, so
+                    # index % len(names) would hand every line to one host.
+                    turn = index // max(1, patter_every)
+                    items.append({"kind": "patter",
+                                  "host": names[turn % len(names)],
+                                  "text": _template_link(previous, track)})
             items.append({"kind": "song", "track": track})
 
         log.info("fallback planner built %d songs for the %s slot",
@@ -573,3 +759,143 @@ def _template_link(previous: dict, upcoming: dict) -> str:
         f"Coming up, {upcoming['title']} by {upcoming['artist']}.",
     ]
     return random.choice(options)
+
+
+def _template_banter(names: list[str], previous: dict, upcoming: dict,
+                     turns: int = 4) -> list[dict]:
+    """A two-host handover for when the LLM cannot write one.
+
+    Short and factual on purpose. This only runs while the model is
+    unreachable, and a stilted exchange that states what is playing beats an
+    ambitious one that lands badly every single time it repeats.
+    """
+    first = names[0]
+    second = names[1] if len(names) > 1 else names[0]
+    scripts = [
+        [(first, f"That was {previous['artist']}, {previous['title']}."),
+         (second, "Not heard that one in a while."),
+         (first, f"Next up is {upcoming['artist']}."),
+         (second, f"{upcoming['title']}. Good call.")],
+        [(second, f"So that was {previous['title']}."),
+         (first, f"{previous['artist']}. Still holds up."),
+         (second, "What are we doing after this?"),
+         (first, f"{upcoming['artist']}, {upcoming['title']}.")],
+        [(first, f"{previous['artist']} there."),
+         (second, "Nice way to keep it moving."),
+         (first, f"Staying in it. {upcoming['artist']} next."),
+         (second, f"{upcoming['title']}. Let it run.")],
+    ]
+    script = random.choice(scripts)[:max(2, min(int(turns), 4))]
+    return [{"host": host, "text": text} for host, text in script]
+
+
+def _template_weather(reading: dict | None, outlook: bool = False) -> str:
+    """A spoken weather line built straight from the reading."""
+    if not reading:
+        return ""
+    temp = _spoken_number(reading.get("temp_c"))
+    if not temp:
+        return ""
+    place = reading.get("place") or "town"
+    condition = reading.get("condition") or ""
+    line = f"Outside in {place} it is {temp} degrees"
+    line += f", {condition}." if condition else "."
+
+    if outlook:
+        high = _spoken_number(reading.get("high_c"))
+        low = _spoken_number(reading.get("low_c"))
+        if high and low:
+            line += f" Later on, a high of {high} and a low of {low}."
+        chance = reading.get("rain_chance")
+        if chance is not None and chance >= 40:
+            line += f" About {_spoken_number(chance)} percent chance of rain."
+    return line
+
+
+def _roll(spec, default: int = 0) -> int:
+    """Read a config value that may be a range [low, high] or a fixed number."""
+    if isinstance(spec, (list, tuple)) and len(spec) >= 2:
+        try:
+            low, high = int(spec[0]), int(spec[1])
+        except (TypeError, ValueError):
+            return default
+        if high < low:
+            low, high = high, low
+        return random.randint(max(0, low), max(0, high))
+    try:
+        return max(0, int(spec))
+    except (TypeError, ValueError):
+        return default
+
+
+_SMALL = {0: "no", 1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}
+_ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+         "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+         "sixteen", "seventeen", "eighteen", "nineteen"]
+_TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy",
+         "eighty", "ninety"]
+
+
+def _count(number: int, noun: str) -> str:
+    word = _SMALL.get(number, str(number))
+    return f"{word} {noun}" + ("" if number == 1 else "s")
+
+
+def _spoken_number(value) -> str:
+    """Digits read badly out loud in some Piper voices; words never do."""
+    try:
+        number = int(round(float(value)))
+    except (TypeError, ValueError):
+        return ""
+    if number < 0:
+        return "minus " + _spoken_number(-number)
+    if number < 20:
+        return _ONES[number]
+    if number < 100:
+        tens, rest = divmod(number, 10)
+        return _TENS[tens] + (f" {_ONES[rest]}" if rest else "")
+    if number == 100:
+        return "a hundred"
+    return str(number)
+
+
+def _pick_host(raw, names: list[str], index: int = 0) -> str:
+    """Map whatever the model wrote in "host" onto a real, speakable host."""
+    wanted = str(raw or "").strip().lower()
+    for name in names:
+        if wanted == name.lower():
+            return name
+    return names[index % len(names)]
+
+
+def _clean_exchange(raw_lines, names: list[str], max_words: int) -> list[dict]:
+    """Turn the model's "lines" array into an alternating, speakable script."""
+    if not isinstance(raw_lines, list):
+        return []
+    per_turn = max(12, max_words // 3)
+
+    turns: list[dict] = []
+    for index, raw in enumerate(raw_lines):
+        if isinstance(raw, dict):
+            host = _pick_host(raw.get("host"), names, index)
+            text = _clean_patter(str(raw.get("text") or ""), per_turn)
+        elif isinstance(raw, str):
+            host = names[index % len(names)]
+            text = _clean_patter(raw, per_turn)
+        else:
+            continue
+        if not text:
+            continue
+        if turns and turns[-1]["host"] == host:
+            # Two turns in a row from one host is not a conversation. Join
+            # them rather than dropping half of what was written.
+            turns[-1]["text"] = _clean_patter(
+                turns[-1]["text"] + " " + text, per_turn * 2)
+            continue
+        turns.append({"host": host, "text": text})
+
+    if len(names) < 2 and turns:
+        # Nobody to bounce off, so read the whole thing as one voice.
+        merged = _clean_patter(" ".join(turn["text"] for turn in turns), max_words)
+        return [{"host": names[0], "text": merged}] if merged else []
+    return turns

@@ -41,11 +41,12 @@ CREATE TABLE IF NOT EXISTS queue_items (
     id         INTEGER PRIMARY KEY,
     block_id   INTEGER,
     seq        INTEGER NOT NULL,
-    kind       TEXT    NOT NULL,           -- 'song' | 'patter'
+    kind       TEXT    NOT NULL,           -- 'song' | 'patter' | 'banter'
     tier       TEXT    NOT NULL DEFAULT 'ai',  -- 'ai' | 'request'
     path       TEXT,
     track_id   INTEGER,
-    text       TEXT,
+    text       TEXT,                       -- patter: the line; banter: JSON turns
+    host       TEXT,                       -- which host speaks a patter line
     title      TEXT,
     artist     TEXT,
     duration   REAL,
@@ -123,6 +124,14 @@ CREATE TABLE IF NOT EXISTS download_log (
 );
 """
 
+# Columns added after the first release. CREATE TABLE IF NOT EXISTS does
+# nothing to a table that already exists, so a database made by an older
+# version needs these bolted on. Adding a column is cheap and idempotent here
+# because we check the table's own schema first.
+MIGRATIONS: list[tuple[str, str, str]] = [
+    ("queue_items", "host", "ALTER TABLE queue_items ADD COLUMN host TEXT"),
+]
+
 
 class Database:
     def __init__(self, path: str | Path):
@@ -157,6 +166,11 @@ class Database:
         conn = self.connect()
         try:
             conn.executescript(SCHEMA)
+            for table, column, ddl in MIGRATIONS:
+                existing = {row["name"] for row in
+                            conn.execute(f"PRAGMA table_info({table})")}
+                if existing and column not in existing:
+                    conn.execute(ddl)
         finally:
             conn.close()
 

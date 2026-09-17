@@ -22,9 +22,11 @@ from .discovery import LastFM
 from .downloader import Downloader
 from .library import Library
 from .liquidsoap import AI_QUEUE, REQUEST_QUEUE, LiquidsoapClient, annotate_uri
+from .publisher import SitePublisher
 from .queueing import QueueManager
 from .tts import TTS
 from .util import human_duration, normalize
+from .weather import Weather
 from .brain.intent import classify
 from .brain.llm import LLM
 from .brain.planner import Planner
@@ -42,9 +44,12 @@ class Runner:
         self.lastfm = LastFM(Config.env("LASTFM_API_KEY"))
         self.llm = LLM(cfg)
         self.tts = TTS(cfg)
-        self.planner = Planner(cfg, self.db, self.library, self.llm)
+        self.weather = Weather(cfg)
+        self.planner = Planner(cfg, self.db, self.library, self.llm, self.weather)
         self.downloader = Downloader(cfg, self.db, self.library, self.lastfm)
         self.queue = QueueManager(cfg, self.db, self.library, self.tts)
+        self.site = SitePublisher(cfg, self.db, self.queue, self.library,
+                                  self.weather)
         self.ls = LiquidsoapClient(
             str(cfg.get("stream.telnet_host", "127.0.0.1")),
             int(cfg.get("stream.telnet_port", 1234)),
@@ -61,6 +66,7 @@ class Runner:
         self._last_housekeeping = 0.0
         self._last_connected: bool | None = None
         self._last_now_playing = ""
+        self._now_playing_since = 0.0
         # Per queue: was the item we pushed last a patter line? Used to
         # kill the crossfade on both sides of a spoken link.
         self._last_push_was_patter: dict[str, bool] = {}
@@ -79,6 +85,12 @@ class Runner:
         log.info("tts: %s", detail)
         if not ok:
             log.warning("patter is disabled until TTS works; music will still play")
+        else:
+            log.info("hosts: %s", self.tts.check_exchange()[1])
+        log.info("weather: %s", "disabled" if not self.weather.enabled
+                 else (self.weather.briefing() or "unavailable right now"))
+        log.info("site: %s", "publishing to gist " + self.site.gist_id
+                 if self.site.enabled else f"not publishing ({self.site.why_disabled()})")
         log.info("llm providers available: %s",
                  ", ".join(self.llm.available_providers) or "none (fallback planner only)")
         log.info("last.fm: %s", "enabled" if self.lastfm.enabled else "disabled (no key)")
@@ -108,6 +120,12 @@ class Runner:
         self.maintain_buffer()
         self.background_work()
         self.feed_stream()
+        # Last, so the site reflects the state this tick actually left behind.
+        self._safe(self.publish_site, "site publish")
+
+    def publish_site(self) -> bool:
+        return self.site.maybe_publish(self._last_now_playing,
+                                       self._now_playing_since)
 
     # -- stream feeding -----------------------------------------------------
 
@@ -160,6 +178,8 @@ class Runner:
         if not current or current == self._last_now_playing:
             return
         self._last_now_playing = current
+        # The site shows a progress bar, which needs to know when this started.
+        self._now_playing_since = time.time()
         try:
             self.cfg.now_playing_path.write_text(current, encoding="utf-8")
         except Exception as exc:
@@ -169,7 +189,7 @@ class Runner:
     def _push(self, queue_id: str, item: dict) -> None:
         title = item.get("title") or ""
         artist = item.get("artist") or ""
-        is_patter = item.get("kind") == "patter"
+        is_patter = item.get("kind") in ("patter", "banter")
         if is_patter:
             title = "Station ID"
 
@@ -211,7 +231,8 @@ class Runner:
                  human_duration(queued_ahead))
         # The block goes behind everything already queued, so it is planned
         # for when it will be heard, not for right now.
-        plan = self.planner.plan_block(airs_in=queued_ahead)
+        plan = self.planner.plan_block(airs_in=queued_ahead,
+                                       speaking_hosts=self.tts.hosts)
         if not plan.get("items"):
             log.warning("planner produced nothing; safety playlist will cover")
             return
@@ -343,7 +364,8 @@ class Runner:
         if bool(self.cfg.get("bot.replan_on_vibe", True)):
             dropped = self.queue.clear_pending("ai")
             log.info("vibe shift: dropped %d unplayed items, re-planning", dropped)
-            plan = self.planner.plan_block(airs_in=self.queue.ready_seconds())
+            plan = self.planner.plan_block(airs_in=self.queue.ready_seconds(),
+                                           speaking_hosts=self.tts.hosts)
             if plan.get("items"):
                 self.queue.build_block(plan)
             return (f"Shifting to: {mood}. Takes effect within a track or two "

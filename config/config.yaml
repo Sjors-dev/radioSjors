@@ -19,22 +19,69 @@ station:
   samplerate: 44100
 
 dj:
-  # Persona is injected verbatim into every LLM prompt. Rewrite freely.
+  # Station-level voice, injected verbatim into every planning prompt. The
+  # individual hosts are described under `hosts` below, so keep this about the
+  # station rather than about one person.
   persona: |
-    You are "Ray", the host of a small private internet radio station with
-    exactly one listener. You are warm, dry, a little wry, and you never
-    oversell. You talk like a late-night host who actually likes the music:
-    short thoughts, concrete details, no radio-cliche hype, no "coming up next
-    on the hottest hits". You never mention that you are an AI. You never
-    mention the weather, traffic, phone numbers, sponsors, or contests, because
-    this station has none of those.
+    This is a small private internet radio station with exactly one listener.
+    The hosts are warm, dry and a little wry, and they never oversell. They
+    talk like late-night radio people who actually like the music: short
+    thoughts, concrete details, no radio-cliche hype, no "coming up next on
+    the hottest hits". They never mention that they are AI, and they never
+    mention traffic, phone numbers, sponsors or contests, because this station
+    has none of those.
+
+  # Two hosts. The first one leads; the second turns up for the occasional
+  # conversation. Delete the second entry to go back to a single voice --
+  # everything else adapts on its own.
+  #
+  # voice_model: leave blank on the first host to inherit tts.voice_model
+  # below. Leave blank on the second and the co-host voice is looked for right
+  # next to the first one, which is where install.sh puts it. A host whose
+  # model is not on disk is silently left out of the show rather than being
+  # read in somebody else's voice.
+  hosts:
+    - name: Ray
+      character: >
+        Dry, unhurried, has heard all of it before. Hands you a record rather
+        than selling it to you.
+      voice_model: ""
+      length_scale:
+    - name: Nina
+      character: >
+        Quicker, more curious, happy to push back. Asks the question the
+        listener would ask, and does not always agree with Ray.
+      voice_model: ""
+      length_scale:
+
   language: english         # english | dutch  (must match the Piper voice below)
-  # A patter line is inserted before every Nth track. 1 = before every track.
+  # A spoken item is inserted before every Nth track. 1 = before every track.
   patter_every_n_tracks: 2
   # Always open a block with a line (time-of-day greeting / show framing).
   patter_at_block_start: true
-  # Soft cap on patter length so Piper renders fast on a weak CPU.
+  # Soft cap on an ordinary link, so Piper renders fast on a weak CPU.
   max_patter_words: 45
+  # Ceiling for the longer items -- a weather moment, a music note, or a whole
+  # two-host conversation. This number is what "talks a bit more" means.
+  max_segment_words: 90
+  # Silence between one host finishing and the other starting. Without a beat
+  # here two voices run together and sound like one person changing timbre.
+  turn_gap_seconds: 0.35
+
+  # How much extra talk an hour gets, on top of the usual short links. Each
+  # number is rolled fresh every hour inside its [low, high] range, and that
+  # is the point: a station that always does exactly one weather slot and two
+  # chats is just a longer format, not a looser one. Set both ends the same to
+  # fix a value, or [0, 0] to switch something off.
+  segments:
+    banter_per_block: [0, 2]        # two-host conversations per hour
+    banter_turns: [4, 6]            # how many turns each conversation runs
+    music_notes_per_block: [0, 2]   # "one true thing about this record"
+    # Chance that an hour mentions the weather at all.
+    weather_chance: 0.5
+    # Hours [start, end) where the weather moment covers the day ahead rather
+    # than only the conditions outside right now.
+    weather_outlook_hours: [5, 11]
 
 tts:
   # piper_cli      -> the `piper` executable on PATH (recommended)
@@ -55,6 +102,30 @@ tts:
   loudnorm: true
   # Give up on a render after this many seconds (Celeron safety valve).
   timeout_seconds: 180
+
+weather:
+  # Open-Meteo: free, no API key, no account, no bill. That is the whole
+  # reason the hosts are allowed to talk about the weather at all.
+  enabled: true
+  place_name: "Eindhoven"
+  latitude: 51.4416
+  longitude: 5.4697
+  timezone: "Europe/Amsterdam"
+  # The station plans an hour ahead anyway, so a reading this old is fine.
+  cache_minutes: 30
+  timeout_seconds: 10
+
+site:
+  # Publishes now-playing and the queue to a secret GitHub Gist, which the
+  # Vercel site under site/ reads. Free, and no new account: you already have
+  # GitHub. Needs GITHUB_TOKEN (scope: gist) and SITE_GIST_ID in .env.
+  enabled: false
+  publish_interval_seconds: 20
+  # How much of the queue and the history the site is allowed to show.
+  queue_length: 8
+  history_length: 12
+  # Key inside the gist. Only change it if you also change the site.
+  filename: "radio.json"
 
 planner:
   # Target length of one planned block, in minutes.
