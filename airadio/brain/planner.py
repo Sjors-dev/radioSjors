@@ -20,7 +20,7 @@ from pathlib import Path
 from ..config import Config
 from ..db import Database
 from ..library import Library
-from ..util import human_duration
+from ..util import human_duration, normalize
 from .llm import LLM, LLMUnavailable
 from .prompts import PLANNER_SYSTEM, PLANNER_USER, TAGGER_SYSTEM, TAGGER_USER
 
@@ -47,8 +47,44 @@ class Planner:
 
     # -- candidate selection ------------------------------------------------
 
-    def select_candidates(self, energy_range: list[int], pool_size: int) -> list[dict]:
-        """Tracks eligible for this hour, newest-cooldown and energy aware."""
+    def artists_named_in(self, text: str) -> list[str]:
+        """Library artists the listener mentioned, if any.
+
+        "something moodier" names nobody; "in the mood for some Westside Gunn"
+        names one, and that has to change which tracks are offered, not just
+        what the prompt says.
+        """
+        needle = normalize(text or "")
+        if not needle:
+            return []
+        found = []
+        for row in self.db.query(
+                "SELECT DISTINCT artist FROM tracks WHERE missing=0"):
+            name = normalize(row["artist"] or "")
+            # Short names ("Air", "Sor") match far too much inside a sentence.
+            if len(name) >= 5 and name in needle:
+                found.append(row["artist"])
+        if found:
+            log.info("mood names library artist(s): %s", ", ".join(found))
+        return found
+
+    def select_candidates(self, energy_range: list[int], pool_size: int,
+                          focus_artists: list[str] | None = None,
+                          exemplar_artists: list[str] | None = None) -> list[dict]:
+        """Tracks eligible for this hour, newest-cooldown and energy aware.
+
+        Two ways an artist can be named, and they mean different things:
+
+        `focus_artists` come from the listener asking for someone right now
+        ("in the mood for some Westside Gunn"). Build the hour around them.
+
+        `exemplar_artists` come from the time-of-day profile ("Soft Rock, think
+        Smashing Pumpkins, Radiohead"). Those are illustrations of a genre, not
+        a running order -- make sure a few are available to pick, no more.
+
+        Either way they have to reach the pool. An instruction to lean towards
+        an artist is worthless if the model is only shown two of their tracks.
+        """
         cooldown_hours = float(self.cfg.get("planner.repeat_cooldown_hours", 8))
         cutoff = time.time() - cooldown_hours * 3600
         low, high = (energy_range + [1, 5])[:2]
@@ -80,7 +116,46 @@ class Planner:
             )
 
         tracks = [dict(row) for row in rows if Path(row["path"]).exists()]
-        return self._diversify(tracks, pool_size)
+        pool = self._diversify(tracks, pool_size)
+
+        if exemplar_artists:
+            pool = self._add_focus(
+                pool, exemplar_artists, pool_size,
+                want=int(self.cfg.get("planner.exemplar_artist_tracks", 3)),
+                label="exemplars")
+        if focus_artists:
+            pool = self._add_focus(
+                pool, focus_artists, pool_size,
+                want=int(self.cfg.get("planner.focus_artist_tracks", 10)),
+                label="focus")
+        return pool
+
+    def _add_focus(self, pool: list[dict], focus_artists: list[str],
+                   pool_size: int, want: int = 10,
+                   label: str = "focus") -> list[dict]:
+        """Put plenty of the named artist in front of the model.
+
+        Ignores the energy band and the play cooldown: an explicit request for
+        an artist outranks the time-of-day profile, and refusing because they
+        were played two hours ago is not what the listener meant.
+        """
+        have = {track["id"] for track in pool}
+        added = 0
+        for artist in focus_artists:
+            for row in self.db.query(
+                    "SELECT * FROM tracks WHERE missing=0 AND artist=? "
+                    "COLLATE NOCASE ORDER BY COALESCE(last_played_at, 0) LIMIT ?",
+                    (artist, want)):
+                if row["id"] in have or not Path(row["path"]).exists():
+                    continue
+                have.add(row["id"])
+                pool.insert(0, dict(row))
+                added += 1
+        if added:
+            log.info("%s %s: %d extra tracks in a pool of %d",
+                     label, ", ".join(focus_artists), added, len(pool))
+        # Trim from the far end so the focus tracks survive the cap.
+        return pool[:max(pool_size, added + 20)]
 
     def _diversify(self, tracks: list[dict], pool_size: int) -> list[dict]:
         """Cap how many tracks per artist reach the LLM.
@@ -142,7 +217,15 @@ class Planner:
         pool_size = int(self.cfg.get("planner.candidate_pool", 60))
         min_tracks = int(self.cfg.get("discovery.min_tracks_to_program", 25))
 
-        candidates = self.select_candidates(profile.get("energy", [1, 5]), pool_size)
+        # The listener asking right now outranks the time-of-day profile, so
+        # an artist named in both is treated as focus, not as an exemplar.
+        focus = self.artists_named_in(self.current_mood())
+        exemplars = [artist for artist in
+                     self.artists_named_in(profile.get("mood", ""))
+                     if artist not in focus]
+        candidates = self.select_candidates(
+            profile.get("energy", [1, 5]), pool_size,
+            focus_artists=focus, exemplar_artists=exemplars)
         if not candidates:
             log.warning("library is empty, cannot plan a block")
             return {"items": [], "source": "empty", "mood_name": profile.get("name"),
@@ -153,7 +236,8 @@ class Planner:
 
         if self.llm.enabled and self.library.count() >= min_tracks:
             try:
-                plan = self._plan_with_llm(airtime, profile, candidates, track_count)
+                plan = self._plan_with_llm(airtime, profile, candidates,
+                                           track_count, focus)
                 if plan["items"]:
                     return plan
                 log.warning("LLM plan had no usable items, falling back")
@@ -162,10 +246,12 @@ class Planner:
             except Exception as exc:
                 log.exception("LLM planning blew up (%s), using fallback planner", exc)
 
-        return self._plan_fallback(airtime, profile, candidates, track_count)
+        return self._plan_fallback(airtime, profile, candidates,
+                                   track_count, focus)
 
     def _plan_with_llm(self, airtime: datetime, profile: dict,
-                       candidates: list[dict], track_count: int) -> dict:
+                       candidates: list[dict], track_count: int,
+                       focus_artists: list[str] | None = None) -> dict:
         """`airtime` is when the listener hears this, not when it was planned."""
         patter_every = int(self.cfg.get("dj.patter_every_n_tracks", 2))
         max_words = int(self.cfg.get("dj.max_patter_words", 45))
@@ -190,9 +276,7 @@ class Planner:
             day=airtime.strftime("%A"),
             slot_name=profile.get("name", "default"),
             slot_mood=profile.get("mood", "varied"),
-            mood_override=(f"The listener has asked for: {mood}\n"
-                           "Weight the picks and your tone towards that."
-                           if mood else ""),
+            mood_override=_mood_note(mood, focus_artists),
             recent=", ".join(self._recent_titles()) or "nothing yet",
             track_count=track_count,
             patter_every=patter_every,
@@ -282,7 +366,8 @@ class Planner:
                         ", ".join(sorted(set(clashes))))
 
     def _plan_fallback(self, airtime: datetime, profile: dict,
-                       candidates: list[dict], track_count: int) -> dict:
+                       candidates: list[dict], track_count: int,
+                       focus_artists: list[str] | None = None) -> dict:
         """Deterministic programming for when the LLM is down.
 
         Weighted-random picks inside the energy band with artist spacing, plus
@@ -291,21 +376,44 @@ class Planner:
         spacing = int(self.cfg.get("planner.artist_spacing", 4))
         patter_every = int(self.cfg.get("dj.patter_every_n_tracks", 2))
         opening = bool(self.cfg.get("dj.patter_at_block_start", True))
+        focus = {artist.lower() for artist in (focus_artists or [])}
 
         pool = list(candidates)
         random.shuffle(pool)
         # Least recently played first, with a random jitter so it is not a cycle.
-        pool.sort(key=lambda t: (t.get("last_played_at") or 0) + random.uniform(0, 3600))
+        # An artist the listener asked for sorts to the front regardless: the
+        # LLM being down is no reason to ignore an explicit request.
+        pool.sort(key=lambda t: (
+            0 if (t.get("artist") or "").lower() in focus else 1,
+            (t.get("last_played_at") or 0) + random.uniform(0, 3600),
+        ))
 
         chosen: list[dict] = []
+        used: set[int] = set()
         recent_artists: list[str] = []
-        for track in pool:
-            if len(chosen) >= track_count:
-                break
-            if track["artist"] in recent_artists[-spacing:]:
-                continue
-            chosen.append(track)
-            recent_artists.append(track["artist"])
+        # Walking the pool once starves on a narrow library: with three artists
+        # and a spacing of four, everything after the third pick is refused and
+        # the "hour" comes out three tracks long. Relax the spacing until the
+        # block is full instead.
+        gap = spacing
+        while len(chosen) < track_count and gap >= 0:
+            progressed = False
+            for track in pool:
+                if len(chosen) >= track_count:
+                    break
+                if track["id"] in used:
+                    continue
+                if gap and track["artist"] in recent_artists[-gap:]:
+                    continue
+                chosen.append(track)
+                used.add(track["id"])
+                recent_artists.append(track["artist"])
+                progressed = True
+            if not progressed:
+                gap -= 1
+        if gap < spacing and chosen:
+            log.info("fallback relaxed artist spacing to %d to fill the block "
+                     "(library is narrow for this slot)", max(gap, 0))
 
         if not chosen:
             chosen = pool[:track_count]
@@ -410,6 +518,23 @@ def _clean_patter(text: str, max_words: int) -> str:
     if len(words) > max_words + 15:
         text = " ".join(words[:max_words]).rstrip(",;: ") + "."
     return text
+
+
+def _mood_note(mood: str, focus_artists: list[str] | None) -> str:
+    """The listener's standing instruction, as the prompt sees it."""
+    if not mood:
+        return ""
+    note = (f"The listener has asked for: {mood}\n"
+            "Weight the picks and your tone towards that.")
+    if focus_artists:
+        names = " and ".join(focus_artists)
+        note += (f"\nThey named {names} specifically, and there are plenty of "
+                 f"their tracks in the list below. Build the hour around them: "
+                 f"play several and let that be the spine of the show. The "
+                 f"artist spacing rule does not apply to {names}, only to "
+                 f"everyone else -- though still never two of their songs back "
+                 f"to back.")
+    return note
 
 
 def _round_clock(moment: datetime) -> str:

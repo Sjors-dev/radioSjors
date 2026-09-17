@@ -72,6 +72,15 @@ planner:
   max_per_artist_in_pool: 0
   # How many candidates to offer the LLM per block (keeps the prompt small).
   candidate_pool: 60
+  # When you name an artist in chat ("in the mood for some Westside Gunn")
+  # this many of their tracks are put in front of the planner, ignoring the
+  # energy band and the repeat cooldown. Asking for someone by name should
+  # actually get you them.
+  focus_artist_tracks: 10
+  # Artists named in a mood_map entry ("think Smashing Pumpkins,
+  # Radiohead") are illustrations of a genre rather than a running order,
+  # so only a few of each are added -- enough to be pickable.
+  exemplar_artist_tracks: 3
   # Hour ranges are [start, end) in 24h local time and must cover 0-23.
   mood_map:
     - hours: [0, 5]

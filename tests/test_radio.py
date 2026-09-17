@@ -1039,6 +1039,69 @@ class TestFallbackPlanner(RadioTestCase):
         self.assertEqual(_round_clock(datetime(2026, 1, 1, 11, 58)), "12:00")
         self.assertEqual(_round_clock(datetime(2026, 1, 1, 23, 59)), "00:00")
 
+    def named_artist_library(self) -> None:
+        for artist in ("Westside Gunn", "Conway the Machine", "Boldy James"):
+            for n in range(12):
+                make_wav(self.cfg.path("library") / f"{artist} - Track {n}.wav",
+                         seconds=3.0 + n * 0.2, tone=hash(artist) % 900 + n + 1)
+        self.library.scan()
+
+    def test_asking_for_an_artist_puts_them_in_the_pool(self):
+        # The pool cap is roughly pool_size/artists, so without this an
+        # explicit request reached the model as two tracks and an instruction
+        # it could not act on.
+        self.named_artist_library()
+        self.planner.set_mood("im in the mood for some westside gunn")
+        pool = self.planner.plan_block(datetime(2026, 1, 1, 14, 0))
+        chosen = [i["track"]["artist"] for i in pool["items"]
+                  if i["kind"] == "song"]
+        self.assertGreaterEqual(chosen.count("Westside Gunn"), 4,
+                                f"asked for Westside Gunn, got {chosen}")
+
+    def test_focus_survives_the_diversity_cap(self):
+        self.named_artist_library()
+        focus = self.planner.select_candidates(
+            [1, 5], 12, focus_artists=["Westside Gunn"])
+        count = sum(1 for t in focus if t["artist"] == "Westside Gunn")
+        self.assertGreaterEqual(count, 5, "the cap swallowed the focus tracks")
+
+    def test_exemplars_are_present_but_do_not_dominate(self):
+        # "think Smashing Pumpkins, Radiohead" illustrates a genre; it is not
+        # an instruction to play only those two. Needs a realistic spread of
+        # artists, since the baseline cap is pool_size / artist_count.
+        self.seed_library(artists=20, per_artist=4)
+        self.named_artist_library()
+        plain = self.planner.select_candidates([1, 5], 40)
+        with_exemplar = self.planner.select_candidates(
+            [1, 5], 40, exemplar_artists=["Westside Gunn"])
+
+        def count(pool):
+            return sum(1 for t in pool if t["artist"] == "Westside Gunn")
+
+        self.assertGreater(count(with_exemplar), count(plain),
+                           "naming an artist changed nothing")
+        self.assertLessEqual(count(with_exemplar), 8,
+                             "exemplars took over the pool")
+
+    def test_artists_named_in_finds_them_in_a_sentence(self):
+        self.named_artist_library()
+        found = self.planner.artists_named_in(
+            "can we get some Westside Gunn tonight")
+        self.assertEqual(found, ["Westside Gunn"])
+
+    def test_artists_named_in_ignores_a_mood_with_no_names(self):
+        self.named_artist_library()
+        self.assertEqual(
+            self.planner.artists_named_in("something darker and slower"), [])
+
+    def test_mood_note_mentions_the_named_artist(self):
+        from airadio.brain.planner import _mood_note
+
+        note = _mood_note("some westside gunn", ["Westside Gunn"])
+        self.assertIn("Westside Gunn", note)
+        self.assertIn("spacing rule does not apply", note)
+        self.assertEqual(_mood_note("", []), "")
+
     def test_mood_state_round_trip(self):
         self.planner.set_mood("darker and slower")
         self.assertEqual(self.planner.current_mood(), "darker and slower")
