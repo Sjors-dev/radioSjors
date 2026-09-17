@@ -44,7 +44,10 @@ Return ONLY a JSON object, no prose around it, shaped exactly like:
 """
 
 PLANNER_USER = """\
-Local time: {clock} ({day})
+This hour goes to air at about {clock} on {day}. That is when the listener will
+be hearing it, so write for then, not for now -- it is being planned well in
+advance. The hour then plays out over the following sixty minutes, so keep any
+mention of the time loose and rounded.
 Time-of-day slot: {slot_name}
 Intended feel: {slot_mood}
 {mood_override}

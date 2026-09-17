@@ -973,6 +973,37 @@ class TestFallbackPlanner(RadioTestCase):
         self.assertTrue(any("spacing window" in line for line in captured.output),
                         captured.output)
 
+    def test_plans_for_when_the_block_airs_not_when_it_is_built(self):
+        # The buffer is an hour deep, so a block built at 10:35 is heard at
+        # 11:30. Planning against the build time picked the wrong time-of-day
+        # slot and had the DJ announce a time that had already passed.
+        self.seed_library(artists=8, per_artist=4)
+        built_at = datetime(2026, 1, 1, 15, 30)
+        plan = self.planner.plan_block(built_at, airs_in=3600)
+        self.assertEqual(plan["mood_name"],
+                         self.cfg.mood_for_hour(16)["name"])
+        self.assertNotEqual(plan["mood_name"],
+                            self.cfg.mood_for_hour(15)["name"])
+
+    def test_no_buffer_means_plan_for_now(self):
+        self.seed_library(artists=8, per_artist=4)
+        plan = self.planner.plan_block(datetime(2026, 1, 1, 15, 30), airs_in=0)
+        self.assertEqual(plan["mood_name"], self.cfg.mood_for_hour(15)["name"])
+
+    def test_airtime_rolls_past_midnight(self):
+        self.seed_library(artists=8, per_artist=4)
+        plan = self.planner.plan_block(datetime(2026, 1, 1, 23, 30), airs_in=3600)
+        self.assertEqual(plan["mood_name"], self.cfg.mood_for_hour(0)["name"])
+
+    def test_clock_is_rounded_for_speech(self):
+        from airadio.brain.planner import _round_clock
+
+        self.assertEqual(_round_clock(datetime(2026, 1, 1, 11, 28)), "11:30")
+        self.assertEqual(_round_clock(datetime(2026, 1, 1, 11, 2)), "11:00")
+        # Rounding up past the hour must roll the hour, not produce 11:60.
+        self.assertEqual(_round_clock(datetime(2026, 1, 1, 11, 58)), "12:00")
+        self.assertEqual(_round_clock(datetime(2026, 1, 1, 23, 59)), "00:00")
+
     def test_mood_state_round_trip(self):
         self.planner.set_mood("darker and slower")
         self.assertEqual(self.planner.current_mood(), "darker and slower")

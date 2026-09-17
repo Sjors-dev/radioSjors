@@ -14,12 +14,13 @@ from __future__ import annotations
 import logging
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from ..config import Config
 from ..db import Database
 from ..library import Library
+from ..util import human_duration
 from .llm import LLM, LLMUnavailable
 from .prompts import PLANNER_SYSTEM, PLANNER_USER, TAGGER_SYSTEM, TAGGER_USER
 
@@ -119,10 +120,24 @@ class Planner:
 
     # -- planning -----------------------------------------------------------
 
-    def plan_block(self, now: datetime | None = None) -> dict:
-        """Produce the next block. Always returns something playable."""
+    def plan_block(self, now: datetime | None = None,
+                   airs_in: float = 0.0) -> dict:
+        """Produce the next block. Always returns something playable.
+
+        `airs_in` is how many seconds of audio are already queued ahead of this
+        block, so it plans for when the listener will actually HEAR it. The
+        buffer is an hour deep by design: planning against the current clock
+        means the time-of-day genre arrives an hour late and the DJ announces
+        a time that passed before anyone heard it.
+        """
         now = now or datetime.now()
-        profile = self.cfg.mood_for_hour(now.hour)
+        airtime = now + timedelta(seconds=max(0.0, airs_in))
+        if airs_in > 60:
+            log.info("planning for %s, which is when this block reaches air "
+                     "(%s of audio queued ahead of it)",
+                     airtime.strftime("%H:%M"), human_duration(airs_in))
+
+        profile = self.cfg.mood_for_hour(airtime.hour)
         block_minutes = float(self.cfg.get("planner.block_minutes", 60))
         pool_size = int(self.cfg.get("planner.candidate_pool", 60))
         min_tracks = int(self.cfg.get("discovery.min_tracks_to_program", 25))
@@ -138,7 +153,7 @@ class Planner:
 
         if self.llm.enabled and self.library.count() >= min_tracks:
             try:
-                plan = self._plan_with_llm(now, profile, candidates, track_count)
+                plan = self._plan_with_llm(airtime, profile, candidates, track_count)
                 if plan["items"]:
                     return plan
                 log.warning("LLM plan had no usable items, falling back")
@@ -147,10 +162,11 @@ class Planner:
             except Exception as exc:
                 log.exception("LLM planning blew up (%s), using fallback planner", exc)
 
-        return self._plan_fallback(now, profile, candidates, track_count)
+        return self._plan_fallback(airtime, profile, candidates, track_count)
 
-    def _plan_with_llm(self, now: datetime, profile: dict, candidates: list[dict],
-                       track_count: int) -> dict:
+    def _plan_with_llm(self, airtime: datetime, profile: dict,
+                       candidates: list[dict], track_count: int) -> dict:
+        """`airtime` is when the listener hears this, not when it was planned."""
         patter_every = int(self.cfg.get("dj.patter_every_n_tracks", 2))
         max_words = int(self.cfg.get("dj.max_patter_words", 45))
         opening = bool(self.cfg.get("dj.patter_at_block_start", True))
@@ -170,8 +186,8 @@ class Planner:
             artist_spacing=int(self.cfg.get("planner.artist_spacing", 4)),
         )
         user = PLANNER_USER.format(
-            clock=now.strftime("%H:%M"),
-            day=now.strftime("%A"),
+            clock=_round_clock(airtime),
+            day=airtime.strftime("%A"),
             slot_name=profile.get("name", "default"),
             slot_mood=profile.get("mood", "varied"),
             mood_override=(f"The listener has asked for: {mood}\n"
@@ -265,8 +281,8 @@ class Planner:
                         "window: %s", len(clashes), spacing,
                         ", ".join(sorted(set(clashes))))
 
-    def _plan_fallback(self, now: datetime, profile: dict, candidates: list[dict],
-                       track_count: int) -> dict:
+    def _plan_fallback(self, airtime: datetime, profile: dict,
+                       candidates: list[dict], track_count: int) -> dict:
         """Deterministic programming for when the LLM is down.
 
         Weighted-random picks inside the energy band with artist spacing, plus
@@ -297,7 +313,7 @@ class Planner:
         items: list[dict] = []
         if opening:
             items.append({"kind": "patter",
-                          "text": _template_opening(now, profile, chosen[0])})
+                          "text": _template_opening(airtime, profile, chosen[0])})
         for index, track in enumerate(chosen):
             if index > 0 and patter_every > 0 and index % patter_every == 0:
                 items.append({"kind": "patter",
@@ -394,6 +410,19 @@ def _clean_patter(text: str, max_words: int) -> str:
     if len(words) > max_words + 15:
         text = " ".join(words[:max_words]).rstrip(",;: ") + "."
     return text
+
+
+def _round_clock(moment: datetime) -> str:
+    """Nearest five minutes.
+
+    An exact time reads badly out loud ("twenty-eight minutes past eleven"),
+    and it is approximate anyway -- the block takes an hour to play out.
+    """
+    minute = int(round(moment.minute / 5.0) * 5)
+    if minute >= 60:
+        moment = moment + timedelta(hours=1)
+        minute = 0
+    return moment.replace(minute=minute).strftime("%H:%M")
 
 
 def _template_opening(now: datetime, profile: dict, first: dict) -> str:

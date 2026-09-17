@@ -174,7 +174,7 @@ def cmd_plan(args, cfg: Config) -> int:
         print("library is empty - run 'airadio bootstrap' first", file=sys.stderr)
         return 1
 
-    plan = app.planner.plan_block()
+    plan = app.planner.plan_block(airs_in=app.queue.ready_seconds())
     print(f"source: {plan['source']}   slot: {plan['mood_name']}")
     if plan.get("show_note"):
         print(f"note:   {plan['show_note']}")

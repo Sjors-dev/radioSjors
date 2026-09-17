@@ -206,9 +206,12 @@ class Runner:
                       self.queue.pending_count())
             return
 
+        queued_ahead = self.queue.ready_seconds()
         log.info("buffer down to %s, planning a new block",
-                 human_duration(self.queue.ready_seconds()))
-        plan = self.planner.plan_block()
+                 human_duration(queued_ahead))
+        # The block goes behind everything already queued, so it is planned
+        # for when it will be heard, not for right now.
+        plan = self.planner.plan_block(airs_in=queued_ahead)
         if not plan.get("items"):
             log.warning("planner produced nothing; safety playlist will cover")
             return
@@ -340,7 +343,7 @@ class Runner:
         if bool(self.cfg.get("bot.replan_on_vibe", True)):
             dropped = self.queue.clear_pending("ai")
             log.info("vibe shift: dropped %d unplayed items, re-planning", dropped)
-            plan = self.planner.plan_block()
+            plan = self.planner.plan_block(airs_in=self.queue.ready_seconds())
             if plan.get("items"):
                 self.queue.build_block(plan)
             return (f"Shifting to: {mood}. Takes effect within a track or two "
