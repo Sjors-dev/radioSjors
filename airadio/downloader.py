@@ -30,17 +30,21 @@ log = logging.getLogger("downloader")
 
 class DownloadResult:
     def __init__(self, ok: bool, track: dict | None = None, reason: str = "",
-                 busy: bool = False):
+                 busy: bool = False, retryable: bool = True):
         self.ok = ok
         self.track = track
         self.reason = reason
         # busy means "someone else holds the download lock", which is not a
         # failure of this track and must not count against its attempts.
         self.busy = busy
+        # retryable=False means trying again would run the identical search and
+        # get the identical answer, so there is no point spending two more
+        # attempts on it.
+        self.retryable = retryable
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return (f"<DownloadResult ok={self.ok} busy={self.busy} "
-                f"reason={self.reason!r}>")
+                f"retryable={self.retryable} reason={self.reason!r}>")
 
 
 class Downloader:
@@ -241,7 +245,13 @@ class Downloader:
                 scored.append((score, candidate))
 
         if not scored:
-            return DownloadResult(False, reason="every candidate failed quality checks")
+            # The search worked, everything it returned was junk. Last.fm has
+            # non-music entries in it ("The Throne of Allah", lecture uploads,
+            # Game of Thrones essays) and no amount of retrying turns those
+            # into a song.
+            return DownloadResult(
+                False, reason="every candidate failed quality checks",
+                retryable=False)
 
         scored.sort(key=lambda pair: pair[0], reverse=True)
         best_score, best = scored[0]
@@ -446,11 +456,15 @@ class Downloader:
             # a perfectly good track as permanently rejected.
             return result
 
+        if result.ok:
+            status = "downloaded"
+        elif not result.retryable or row["attempts"] >= 2:
+            status = "rejected"
+        else:
+            status = "new"
         self.db.execute(
             "UPDATE candidates SET attempts = attempts + 1, status=?, note=?, "
             "updated_at=? WHERE id=?",
-            ("downloaded" if result.ok else
-             ("rejected" if row["attempts"] >= 2 else "new"),
-             result.reason, time.time(), row["id"]),
+            (status, result.reason, time.time(), row["id"]),
         )
         return result

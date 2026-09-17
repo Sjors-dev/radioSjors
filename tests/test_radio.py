@@ -693,6 +693,37 @@ class TestDiscoveryBreadth(RadioTestCase):
         self.assertFalse(result.ok)
         self.assertTrue(result.busy)
 
+    def test_junk_candidate_is_rejected_on_the_first_try(self):
+        # Last.fm returns non-music entries. If every search result fails the
+        # quality checks, running the identical search twice more just wastes
+        # yt-dlp calls on a two-core CPU.
+        self.db.execute(
+            "INSERT INTO candidates(dedupe_key, artist, title, source, created_at) "
+            "VALUES(?,?,?,?,?)", ("j|k", "The Throne of Allah", "Mindblowing",
+                                  "lastfm", 0))
+        self.downloader._search = lambda artist, title: [
+            {"id": "x", "url": "u", "title": "A lecture", "channel": "Some Channel",
+             "duration": 4597},
+        ]
+        result = self.downloader.fetch_next_candidate()
+        self.assertFalse(result.ok)
+        self.assertFalse(result.retryable)
+        row = self.db.one(
+            "SELECT status FROM candidates WHERE artist='The Throne of Allah'")
+        self.assertEqual(row["status"], "rejected")
+
+    def test_a_search_that_returned_nothing_is_retried(self):
+        # An empty search can be a transient network problem, unlike results
+        # that are all junk.
+        self.db.execute(
+            "INSERT INTO candidates(dedupe_key, artist, title, source, created_at) "
+            "VALUES(?,?,?,?,?)", ("e|f", "Flaky Artist", "Flaky", "lastfm", 0))
+        self.downloader._search = lambda artist, title: []
+        result = self.downloader.fetch_next_candidate()
+        self.assertTrue(result.retryable)
+        row = self.db.one("SELECT status FROM candidates WHERE artist='Flaky Artist'")
+        self.assertEqual(row["status"], "new")
+
     def test_a_real_failure_still_counts(self):
         # No lock held; Last.fm is fake and yt-dlp will find nothing.
         self.db.execute(
