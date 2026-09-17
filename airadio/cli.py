@@ -131,6 +131,7 @@ def cmd_bootstrap(args, cfg: Config) -> int:
     print("  finding candidates on Last.fm...", flush=True)
     app.downloader.seed_candidates(wanted=60)
     failures = 0
+    waits = 0
     while app.library.count() < target and failures < 15:
         result = app.downloader.fetch_next_candidate()
         if result is None:
@@ -139,6 +140,22 @@ def cmd_bootstrap(args, cfg: Config) -> int:
                 print("ran out of candidates from Last.fm")
                 break
             continue
+        if result.busy:
+            # The brain is mid-download. That is not a failure of anything, so
+            # wait for it rather than spending the failure budget losing a
+            # lock race fifteen times in a row.
+            waits += 1
+            if waits == 1 or waits % 10 == 0:
+                print("  waiting for the brain to finish its download...",
+                      flush=True)
+            if waits > 240:
+                print("the brain has held the download lock for a long time; "
+                      "stop ai-radio-brain and re-run, or lower "
+                      "discovery.downloads_per_hour")
+                break
+            time.sleep(5)
+            continue
+        waits = 0
         if result.ok:
             failures = 0
             print(f"  [{app.library.count():>3}] "

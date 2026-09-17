@@ -670,6 +670,41 @@ class TestDiscoveryBreadth(RadioTestCase):
         self.add_tracks("Nobody", 50)
         self.assertFalse(self.downloader.artist_is_full("Nobody"))
 
+    def test_lock_contention_does_not_burn_an_attempt(self):
+        # Losing the download lock to the brain is not a failure of the track.
+        # Counting it marked good candidates as permanently rejected after
+        # three unlucky races.
+        self.downloader.lock_path.write_text("999999", encoding="utf-8")
+        self.db.execute(
+            "INSERT INTO candidates(dedupe_key, artist, title, source, created_at) "
+            "VALUES(?,?,?,?,?)", ("a|b", "Artist", "Title", "test", 0))
+
+        for _ in range(5):
+            result = self.downloader.fetch_next_candidate()
+            self.assertTrue(result.busy, result)
+
+        row = self.db.one("SELECT attempts, status FROM candidates WHERE artist='Artist'")
+        self.assertEqual(row["attempts"], 0)
+        self.assertEqual(row["status"], "new")
+
+    def test_lock_contention_is_flagged_busy_not_merely_failed(self):
+        self.downloader.lock_path.write_text("999999", encoding="utf-8")
+        result = self.downloader.fetch("Artist", "Title")
+        self.assertFalse(result.ok)
+        self.assertTrue(result.busy)
+
+    def test_a_real_failure_still_counts(self):
+        # No lock held; Last.fm is fake and yt-dlp will find nothing.
+        self.db.execute(
+            "INSERT INTO candidates(dedupe_key, artist, title, source, created_at) "
+            "VALUES(?,?,?,?,?)", ("c|d", "Nonexistent Artist", "Nonexistent", "test", 0))
+        self.downloader._search = lambda artist, title: []
+        result = self.downloader.fetch_next_candidate()
+        self.assertFalse(result.busy)
+        row = self.db.one(
+            "SELECT attempts FROM candidates WHERE artist='Nonexistent Artist'")
+        self.assertEqual(row["attempts"], 1)
+
     def test_artist_cap_blocks_further_candidates(self):
         self.cfg._data["discovery"]["seed_artists"] = []
         self.cfg._data["discovery"]["max_tracks_per_artist"] = 2

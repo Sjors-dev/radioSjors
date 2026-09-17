@@ -29,13 +29,18 @@ log = logging.getLogger("downloader")
 
 
 class DownloadResult:
-    def __init__(self, ok: bool, track: dict | None = None, reason: str = ""):
+    def __init__(self, ok: bool, track: dict | None = None, reason: str = "",
+                 busy: bool = False):
         self.ok = ok
         self.track = track
         self.reason = reason
+        # busy means "someone else holds the download lock", which is not a
+        # failure of this track and must not count against its attempts.
+        self.busy = busy
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"<DownloadResult ok={self.ok} reason={self.reason!r}>"
+        return (f"<DownloadResult ok={self.ok} busy={self.busy} "
+                f"reason={self.reason!r}>")
 
 
 class Downloader:
@@ -199,7 +204,8 @@ class Downloader:
             return DownloadResult(True, existing, "already in library")
 
         if not self._acquire_lock():
-            return DownloadResult(False, reason="another download is running")
+            return DownloadResult(False, reason="another download is running",
+                                  busy=True)
 
         try:
             return self._fetch_locked(artist, title, allow_remix, max_seconds)
@@ -433,13 +439,16 @@ class Downloader:
             if row is None:
                 return None
 
-        self.db.execute(
-            "UPDATE candidates SET attempts = attempts + 1, updated_at=? WHERE id=?",
-            (time.time(), row["id"]),
-        )
         result = self.fetch(row["artist"], row["title"])
+        if result.busy:
+            # Lost the lock race. Nothing to record: the candidate was never
+            # actually tried, so burning an attempt on it would eventually mark
+            # a perfectly good track as permanently rejected.
+            return result
+
         self.db.execute(
-            "UPDATE candidates SET status=?, note=?, updated_at=? WHERE id=?",
+            "UPDATE candidates SET attempts = attempts + 1, status=?, note=?, "
+            "updated_at=? WHERE id=?",
             ("downloaded" if result.ok else
              ("rejected" if row["attempts"] >= 2 else "new"),
              result.reason, time.time(), row["id"]),
