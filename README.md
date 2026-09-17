@@ -136,7 +136,13 @@ it when the LLM is down:
 
 - `play bohemian rhapsody by queen` → queued as a request; downloaded first if
   it isn't in the library
-- `make it darker and slower` → updates the station mood and re-plans
+- `play some westside gunn` (artist, no song) → queues one of theirs, and if
+  the library has fewer than `bot.min_tracks_for_request` (4 by default),
+  fetches a few more from Last.fm on the spot first
+- `make it darker and slower` / `in the mood for some westside gunn` → updates
+  the station mood and re-plans; an artist named in the mood gets the same
+  on-demand top-up before the next block is built, so the hour is actually
+  built around them instead of replaying the one track on hand
 - `skip this song please` / `next song` → skips the current track (does **not** ban it)
 - `never play this again` / `delete this song` → bans whatever is on air
 - `ban Runaway by Kanye West` → bans a named track

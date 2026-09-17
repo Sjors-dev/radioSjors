@@ -311,6 +311,16 @@ bot:
   replan_on_vibe: true
   # Refuse to download anything longer than this for a chat request (minutes).
   max_request_minutes: 12
+  # When a chat message names an artist (a mood like "in the mood for some
+  # Westside Gunn", or "play some Westside Gunn" with no specific song) and
+  # the library has fewer than this many of their tracks, fetch a few more
+  # from Last.fm right then -- so the request actually means something,
+  # instead of the one track we happen to have looping.
+  min_tracks_for_request: 4
+  # How long that on-demand fetch is allowed to run before giving up with
+  # whatever it has. Bounded on purpose: a chat reply should not sit for
+  # minutes waiting on someone's whole discography.
+  backfill_budget_seconds: 60
 
 runner:
   # Main loop tick, seconds.

@@ -299,6 +299,8 @@ Worth knowing about:
 | `discovery.library_target` | Stop growing at this many tracks. `0` for no cap. |
 | `downloader.reject_title_patterns` | The junk filter. Whole-word matched, so `live` won't reject *Livewire*. |
 | `stream.liquidsoap_queue_depth` | How many items sit inside liquidsoap. Lower = mood shifts apply sooner; higher = more slack if the brain stalls. |
+| `bot.min_tracks_for_request` | Naming an artist in chat (a request or a mood) tops the library up to this many of their tracks on the spot if it's short. `0` disables the on-demand fetch entirely. |
+| `bot.backfill_budget_seconds` | Ceiling on how long that on-demand fetch is allowed to run before giving up with whatever it got. It runs inside the chat reply, so keep this well under a few minutes. |
 
 ---
 

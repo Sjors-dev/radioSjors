@@ -405,6 +405,61 @@ class Downloader:
         cap = self.artist_cap(artist)
         return bool(cap) and self.artist_track_count(artist) >= cap
 
+    def backfill_artist(self, artist: str, minimum: int,
+                        budget_seconds: float = 60.0) -> int:
+        """Fetch enough tracks by a named artist that a request means
+        something, instead of the one track we happen to already have
+        looping.
+
+        Called synchronously from a chat request, so it is bounded on both
+        ends: never chases past the artist's own cap (a seed artist gets more
+        room than a stranger, same rule as background growth), and gives up
+        once `budget_seconds` has passed rather than leaving a Discord reply
+        hanging for a whole discography on a two-core laptop. Returns how
+        many tracks were actually added.
+        """
+        if not self.lastfm.enabled:
+            return 0
+
+        have = self.artist_track_count(artist)
+        cap = self.artist_cap(artist)
+        target = min(minimum, cap) if cap else minimum
+        if have >= target:
+            return 0
+        need = target - have
+
+        candidates = self.lastfm.top_tracks(artist, limit=max(need * 3, 15))
+        if not candidates:
+            return 0
+
+        started = time.time()
+        added = 0
+        for candidate in candidates:
+            if added >= need:
+                break
+            if time.time() - started > budget_seconds:
+                log.info("backfill for %s hit the %.0fs budget with %d/%d "
+                         "added", artist, budget_seconds, added, need)
+                break
+            if self.library.is_banned(candidate["artist"], candidate["title"]):
+                continue
+            if self.library.has_track(candidate["artist"], candidate["title"]):
+                continue
+            result = self.fetch(candidate["artist"], candidate["title"])
+            if result.busy:
+                # Something else -- background growth, a bootstrap run --
+                # holds the lock. Not worth making the listener wait it out.
+                log.info("backfill for %s paused: download lock is busy",
+                         artist)
+                break
+            if result.ok:
+                added += 1
+
+        if added:
+            log.info("backfilled %d track(s) for %s on request (had %d, now "
+                     "%d)", added, artist, have, have + added)
+        return added
+
     def seed_candidates(self, wanted: int = 25) -> int:
         """Ask Last.fm for new tracks and stash them as pending candidates."""
         seeds = list(self.cfg.get("discovery.seed_artists", []) or [])

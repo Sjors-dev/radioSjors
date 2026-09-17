@@ -280,6 +280,17 @@ class SitePublisher:
         }
         response = self._session.post(f"{API}/gists", json=body,
                                       headers=self._headers(), timeout=20)
-        response.raise_for_status()
+        if not response.ok:
+            # GitHub's own message ("Bad credentials", "Resource not
+            # accessible by personal access token", ...) is worth far more
+            # than the generic "401 Client Error" requests would raise here --
+            # that is the whole difference between "the token is wrong" and
+            # "guess why".
+            detail = response.reason
+            try:
+                detail = response.json().get("message") or detail
+            except Exception:
+                pass
+            raise RuntimeError(f"{response.status_code} {detail}")
         data = response.json()
         return data["id"], data.get("html_url", "")

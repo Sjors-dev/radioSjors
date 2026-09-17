@@ -24,7 +24,7 @@ import yaml
 from airadio.config import Config
 from airadio.db import Database
 from airadio.discovery import LastFM
-from airadio.downloader import Downloader
+from airadio.downloader import Downloader, DownloadResult
 from airadio.library import Library
 from airadio.liquidsoap import annotate_uri, format_metadata, parse_metadata
 from airadio.publisher import SitePublisher
@@ -806,6 +806,220 @@ class TestDiscoveryBreadth(RadioTestCase):
             "SELECT artist, COUNT(*) AS n FROM tracks WHERE missing=0 "
             "GROUP BY artist ORDER BY n ASC LIMIT 10")
         self.assertEqual(rows[0]["artist"], "Radiohead")
+
+
+class TestBackfillOnDemand(RadioTestCase):
+    """A chat request naming a thin artist should fetch more of them, not
+    just hand back the one track already on hand."""
+
+    def setUp(self):
+        super().setUp()
+        self.lastfm = FakeLastFM({}, tracks_per_artist=20)
+        self.downloader = Downloader(self.cfg, self.db, self.library, self.lastfm)
+        self.fetched: list[tuple[str, str]] = []
+
+    def add_tracks(self, artist: str, count: int) -> None:
+        for n in range(count):
+            self.db.execute(
+                "INSERT INTO tracks(path, dedupe_key, title, artist, added_at) "
+                "VALUES(?,?,?,?,?)",
+                (f"/x/{normalize(artist)}-{n}.mp3",
+                 f"{normalize(artist)}|track {n}", f"Track {n}", artist, 0))
+
+    def stub_fetch_always_succeeds(self) -> None:
+        """Stand in for the real fetch(): records the call and actually
+        inserts a row, so artist_track_count reflects progress exactly like
+        the real downloader would."""
+        def fake_fetch(artist, title, allow_remix=False, max_seconds=None):
+            self.fetched.append((artist, title))
+            self.add_tracks_one(artist, title)
+            return DownloadResult(True, {"artist": artist, "title": title})
+        self.downloader.fetch = fake_fetch
+
+    def add_tracks_one(self, artist: str, title: str) -> None:
+        self.db.execute(
+            "INSERT INTO tracks(path, dedupe_key, title, artist, added_at) "
+            "VALUES(?,?,?,?,?)",
+            (f"/x/{normalize(artist)}-{normalize(title)}.mp3",
+             dedupe_key(artist, title), title, artist, 0))
+
+    def test_tops_up_to_the_minimum(self):
+        self.add_tracks("Thin Artist", 1)
+        self.stub_fetch_always_succeeds()
+        added = self.downloader.backfill_artist("Thin Artist", minimum=4)
+        self.assertEqual(added, 3)
+        self.assertEqual(self.downloader.artist_track_count("Thin Artist"), 4)
+
+    def test_does_nothing_once_the_minimum_is_already_met(self):
+        self.add_tracks("Well Stocked", 5)
+        self.stub_fetch_always_succeeds()
+        added = self.downloader.backfill_artist("Well Stocked", minimum=4)
+        self.assertEqual(added, 0)
+        self.assertEqual(self.fetched, [])
+
+    def test_never_fetches_past_the_artists_own_cap(self):
+        # Non-seed artists are capped at discovery.max_tracks_per_artist (8
+        # in the shipped config). Asking for way more than that must not
+        # blow past the cap just because the listener asked for a lot.
+        self.assertEqual(self.cfg.get("discovery.max_tracks_per_artist"), 8)
+        self.stub_fetch_always_succeeds()
+        added = self.downloader.backfill_artist("New Artist", minimum=50)
+        self.assertEqual(added, 8)
+        self.assertEqual(self.downloader.artist_track_count("New Artist"), 8)
+
+    def test_seed_artists_get_the_higher_ceiling(self):
+        self.cfg._data["discovery"]["seed_artists"] = ["Favourite"]
+        self.lastfm.tracks_per_artist = 50  # more than either ceiling
+        self.stub_fetch_always_succeeds()
+        added = self.downloader.backfill_artist("Favourite", minimum=50)
+        self.assertEqual(added, 30)  # max_tracks_per_seed_artist default
+
+    def test_skips_candidates_already_owned_or_banned(self):
+        self.add_tracks("Mixed Bag", 1)  # "Track 0" already present
+        self.library.ban({"id": 1, "artist": "Mixed Bag", "title": "Track 1",
+                          "path": "/x/mixed-1.mp3", "dedupe_key":
+                          dedupe_key("Mixed Bag", "Track 1")},
+                         reason="test", banned_dir=self.cfg.path("banned"))
+        self.stub_fetch_always_succeeds()
+        self.downloader.backfill_artist("Mixed Bag", minimum=4)
+        # Track 0 (owned) and Track 1 (banned) must never reach fetch().
+        self.assertNotIn(("Mixed Bag", "Track 0"), self.fetched)
+        self.assertNotIn(("Mixed Bag", "Track 1"), self.fetched)
+
+    def test_stops_at_the_time_budget_rather_than_finishing_the_list(self):
+        self.stub_fetch_always_succeeds()
+        added = self.downloader.backfill_artist("Slow Artist", minimum=10,
+                                                 budget_seconds=-1)
+        self.assertEqual(added, 0)
+        self.assertEqual(self.fetched, [])
+
+    def test_stops_when_the_download_lock_is_busy(self):
+        calls = []
+        def busy_fetch(artist, title, allow_remix=False, max_seconds=None):
+            calls.append((artist, title))
+            return DownloadResult(False, busy=True, reason="another download "
+                                  "is running")
+        self.downloader.fetch = busy_fetch
+        added = self.downloader.backfill_artist("Busy Artist", minimum=4)
+        self.assertEqual(added, 0)
+        # One attempt, then it gives up rather than hammering a busy lock.
+        self.assertEqual(len(calls), 1)
+
+    def test_no_lastfm_key_means_no_backfill(self):
+        downloader = Downloader(self.cfg, self.db, self.library, LastFM(""))
+        added = downloader.backfill_artist("Anybody", minimum=4)
+        self.assertEqual(added, 0)
+
+
+class _StubLiquidsoap:
+    """Stands in for the stream engine. No socket, ever."""
+
+    connected = False
+
+    def poll(self, *queue_ids):
+        return None
+
+    def push(self, *args, **kwargs):
+        return False
+
+    def skip(self):
+        return False
+
+
+class TestChatBackfillIntegration(RadioTestCase):
+    """A chat request naming a thin artist, wired through a real Runner with
+    the stream engine and the network stubbed out."""
+
+    def setUp(self):
+        super().setUp()
+        from airadio.runner import Runner
+
+        self.runner = Runner(self.cfg)
+        self.runner.ls = _StubLiquidsoap()
+        self.lastfm = FakeLastFM({}, tracks_per_artist=20)
+        self.runner.lastfm = self.lastfm
+        self.runner.downloader = Downloader(self.cfg, self.runner.db,
+                                            self.runner.library, self.lastfm)
+        self.fetched: list[tuple[str, str]] = []
+
+        def fake_fetch(artist, title, allow_remix=False, max_seconds=None):
+            self.fetched.append((artist, title))
+            self._insert_track(artist, title)
+            return DownloadResult(True, {"artist": artist, "title": title})
+
+        self.runner.downloader.fetch = fake_fetch
+
+    def _insert_track(self, artist: str, title: str) -> None:
+        # plan_block filters candidates to files that actually exist on disk,
+        # same as the real downloader leaves behind -- a DB-only row would be
+        # invisible to the planner and the test would not prove anything.
+        path = (self.runner.cfg.path("library")
+               / f"{normalize(artist)}-{normalize(title)}.mp3")
+        path.write_bytes(b"")
+        self.runner.db.execute(
+            "INSERT INTO tracks(path, dedupe_key, title, artist, duration, "
+            "added_at) VALUES(?,?,?,?,?,?)",
+            (str(path), dedupe_key(artist, title), title, artist, 180.0, 0))
+
+    def add_tracks(self, artist: str, count: int) -> None:
+        for n in range(count):
+            self._insert_track(artist, f"Track {n}")
+
+    def test_vibe_request_backfills_a_thin_named_artist(self):
+        self.add_tracks("Westside Gunn", 1)
+        reply = self.runner._handle_vibe_request(
+            {"mood": "in the mood for some Westside Gunn"})
+        self.assertGreaterEqual(
+            self.runner.downloader.artist_track_count("Westside Gunn"), 4)
+        self.assertIn("Westside Gunn", reply)
+        self.assertIn("Grabbed", reply)
+
+    def test_the_backfilled_tracks_are_available_before_the_replan(self):
+        # The point of doing this before set_mood/plan_block, not after: a
+        # block built from the old, thin pool would not use them at all.
+        self.add_tracks("Westside Gunn", 1)
+        self.runner._handle_vibe_request(
+            {"mood": "in the mood for some Westside Gunn"})
+        planned = self.runner.db.one(
+            "SELECT COUNT(*) AS n FROM queue_items WHERE artist='Westside Gunn' "
+            "AND status IN ('ready', 'pending')")
+        self.assertGreater(planned["n"], 0)
+
+    def test_vibe_request_does_not_touch_an_already_well_stocked_artist(self):
+        self.add_tracks("Well Stocked", 6)
+        self.runner._handle_vibe_request({"mood": "some Well Stocked please"})
+        self.assertEqual(self.fetched, [])
+
+    def test_vibe_request_naming_nobody_does_not_call_lastfm(self):
+        self.runner._handle_vibe_request({"mood": "something darker and slower"})
+        self.assertEqual(self.fetched, [])
+
+    def test_artist_only_request_backfills_then_queues_one(self):
+        self.add_tracks("Thin Guy", 1)
+        reply = self.runner._handle_track_request(
+            {"artist": "Thin Guy", "title": ""})
+        self.assertIn("Thin Guy", reply)
+        self.assertGreaterEqual(
+            self.runner.downloader.artist_track_count("Thin Guy"), 4)
+        queued = self.runner.db.one(
+            "SELECT COUNT(*) AS n FROM queue_items WHERE tier='request'")
+        self.assertEqual(queued["n"], 1)
+
+    def test_artist_only_request_no_longer_settles_for_a_fuzzy_match(self):
+        # Before this fix, an artist-only request fell through to the fuzzy
+        # title search on just the artist name and could return whichever one
+        # track happened to match best, without ever trying to fetch more.
+        self.add_tracks("One Song Wonder", 1)
+        self.runner._handle_track_request({"artist": "One Song Wonder", "title": ""})
+        self.assertTrue(self.fetched, "no backfill was attempted at all")
+
+    def test_artist_only_request_with_nothing_and_no_lastfm(self):
+        self.runner.lastfm = LastFM("")
+        self.runner.downloader = Downloader(self.cfg, self.runner.db,
+                                            self.runner.library, self.runner.lastfm)
+        reply = self.runner._handle_track_request(
+            {"artist": "Total Stranger", "title": ""})
+        self.assertIn("not set up", reply)
 
 
 class TestLibrary(RadioTestCase):
@@ -1767,6 +1981,65 @@ class TestSitePublisher(RadioTestCase):
         self.assertFalse(self.site.publish_now({"a": 1}))
         self.assertEqual(self.site._failures, 1)
         self.assertGreater(self.site._quiet_until, time.time())
+
+    def test_create_gist_surfaces_githubs_own_error_message(self):
+        # A bare requests.HTTPError only says "401 Client Error: Unauthorized
+        # for url: ...", which is useless for telling "bad token" apart from
+        # "wrong scope" apart from "fine-grained tokens can't do this at all".
+        # GitHub's response body says which one it actually is.
+        self.site.token = "bad-token"
+
+        class FakeResponse:
+            ok = False
+            status_code = 401
+            reason = "Unauthorized"
+
+            def json(self):
+                return {"message": "Bad credentials"}
+
+        self.site._session.post = lambda *a, **k: FakeResponse()
+        with self.assertRaises(RuntimeError) as ctx:
+            self.site.create_gist()
+        self.assertIn("401", str(ctx.exception))
+        self.assertIn("Bad credentials", str(ctx.exception))
+
+    def test_create_gist_works_without_a_json_body(self):
+        # Some failure modes (a proxy, a rate limit) return no JSON at all.
+        # The message must fall back to the HTTP reason instead of crashing.
+        self.site.token = "bad-token"
+
+        class FakeResponse:
+            ok = False
+            status_code = 403
+            reason = "Forbidden"
+
+            def json(self):
+                raise ValueError("not json")
+
+        self.site._session.post = lambda *a, **k: FakeResponse()
+        with self.assertRaises(RuntimeError) as ctx:
+            self.site.create_gist()
+        self.assertIn("403", str(ctx.exception))
+        self.assertIn("Forbidden", str(ctx.exception))
+
+    def test_create_gist_succeeds_and_returns_id_and_url(self):
+        self.site.token = "good-token"
+
+        class FakeResponse:
+            ok = True
+
+            def json(self):
+                return {"id": "abc123", "html_url": "https://gist.github.com/abc123"}
+
+        self.site._session.post = lambda *a, **k: FakeResponse()
+        gist_id, url = self.site.create_gist()
+        self.assertEqual(gist_id, "abc123")
+        self.assertEqual(url, "https://gist.github.com/abc123")
+
+    def test_create_gist_refuses_without_a_token(self):
+        self.site.token = ""
+        with self.assertRaises(RuntimeError):
+            self.site.create_gist()
 
 
 def _raise(*args, **kwargs):

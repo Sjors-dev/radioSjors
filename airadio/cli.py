@@ -300,6 +300,29 @@ def cmd_site_init(args, cfg: Config) -> int:
         gist_id, url = app.site.create_gist()
     except Exception as exc:
         print(f"could not create the gist: {exc}", file=sys.stderr)
+        if "401" in str(exc) or "Bad credentials" in str(exc):
+            print(
+                "\nThat means GitHub rejected the token itself, not this "
+                "script. Likely causes:\n"
+                "  1. The token is a 'fine-grained' PAT. Those cannot create "
+                "gists at all --\n"
+                "     GitHub's Gist API only accepts a CLASSIC token. Make "
+                "one at\n"
+                "     https://github.com/settings/tokens -> 'Generate new "
+                "token (classic)',\n"
+                "     tick ONLY the 'gist' scope.\n"
+                "  2. GITHUB_TOKEN is already set in this shell (from an "
+                "earlier `export` or a\n"
+                "     login script), so editing .env did nothing -- .env "
+                "never overrides a\n"
+                "     variable the shell already has. Check with:\n"
+                "       echo $GITHUB_TOKEN\n"
+                "     If that prints something, `unset GITHUB_TOKEN` and "
+                "run this again, or\n"
+                "     open a fresh terminal.\n"
+                "  3. The token was copied with a trailing space/newline, or "
+                "was revoked.",
+                file=sys.stderr)
         return 1
     print(f"Created: {url}\n")
     print("Add this to .env on the laptop:")

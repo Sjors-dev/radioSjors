@@ -333,8 +333,15 @@ class Runner:
     def _handle_track_request(self, intent: dict) -> str:
         artist = intent.get("artist", "")
         title = intent.get("title", "")
-        query = f"{artist} {title}".strip()
 
+        if artist and not title:
+            # "play some Playboi Carti" -- no specific song named. This used
+            # to fall through to the fuzzy title search on just the artist
+            # name, which would happily hand back whichever one track
+            # matched best rather than actually fetching more of them.
+            return self._handle_artist_only_request(artist)
+
+        query = f"{artist} {title}".strip()
         track = self.library.has_track(artist, title) if artist and title else None
         if track is None:
             track = self.library.find(query)
@@ -355,10 +362,51 @@ class Runner:
         self.feed_stream()
         return f"Queued {track['artist']} - {track['title']}, up after this track."
 
+    def _handle_artist_only_request(self, artist: str) -> str:
+        """They named an artist with no specific song. Make sure there is
+        actually enough of them in the library to be worth a request, fetching
+        more on demand if not, then queue one to play now.
+        """
+        minimum = int(self.cfg.get("bot.min_tracks_for_request", 4))
+        have_before = self.downloader.artist_track_count(artist)
+        added = 0
+        if have_before < minimum:
+            budget = float(self.cfg.get("bot.backfill_budget_seconds", 60))
+            added = self._safe(
+                lambda: self.downloader.backfill_artist(artist, minimum, budget),
+                "on-demand backfill") or 0
+
+        row = self.db.one(
+            "SELECT * FROM tracks WHERE missing=0 AND artist=? COLLATE NOCASE "
+            "ORDER BY COALESCE(last_played_at, 0) LIMIT 1", (artist,))
+        if row is None:
+            if not self.lastfm.enabled:
+                return (f"I don't have anything by {artist}, and Last.fm is "
+                        "not set up so I can't go find some.")
+            return f"Could not find any {artist} tracks worth keeping."
+
+        track = dict(row)
+        self.queue.enqueue_request(track)
+        self.feed_stream()
+
+        if added:
+            return (f"Queued {track['artist']} - {track['title']}, and grabbed "
+                    f"{added} more {artist} track{'s' if added != 1 else ''} "
+                    f"while I was at it ({have_before + added} in the library "
+                    "now).")
+        return f"Queued {track['artist']} - {track['title']}, up after this track."
+
     def _handle_vibe_request(self, intent: dict) -> str:
         mood = intent.get("mood") or intent.get("reply") or ""
         if not mood:
             return "Not sure what mood you meant."
+
+        # An artist named in the mood ("in the mood for some Westside Gunn")
+        # is worthless as a focus if there is only one of their tracks to
+        # pick from. Top it up before planning, not after -- the freshly
+        # downloaded tracks need to exist before plan_block can offer them.
+        filled = self._backfill_named_artists(mood)
+
         self.planner.set_mood(mood)
 
         if bool(self.cfg.get("bot.replan_on_vibe", True)):
@@ -368,9 +416,32 @@ class Runner:
                                            speaking_hosts=self.tts.hosts)
             if plan.get("items"):
                 self.queue.build_block(plan)
+            extra = (f" Grabbed a few more {', '.join(filled)} tracks first."
+                    if filled else "")
             return (f"Shifting to: {mood}. Takes effect within a track or two "
-                    f"(a couple are already queued up).")
+                    f"(a couple are already queued up).{extra}")
         return f"Shifting to: {mood} from the next block."
+
+    def _backfill_named_artists(self, mood: str) -> list[str]:
+        """Top up any library artist the mood names but is thin on.
+
+        Only catches artists already in the library (that is how
+        `artists_named_in` finds them at all) -- a totally unheard-of artist
+        named in free-text mood prose still needs an explicit
+        "play <song> by <artist>" to get its first track downloaded.
+        """
+        minimum = int(self.cfg.get("bot.min_tracks_for_request", 4))
+        budget = float(self.cfg.get("bot.backfill_budget_seconds", 60))
+        filled = []
+        for artist in self.planner.artists_named_in(mood):
+            if self.downloader.artist_track_count(artist) >= minimum:
+                continue
+            added = self._safe(
+                lambda a=artist: self.downloader.backfill_artist(a, minimum, budget),
+                "on-demand backfill")
+            if added:
+                filled.append(artist)
+        return filled
 
     # -- background ---------------------------------------------------------
 
