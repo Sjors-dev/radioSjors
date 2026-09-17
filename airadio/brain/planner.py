@@ -491,6 +491,8 @@ class Planner:
                         len(used))
             return []
 
+        items = _drop_consecutive_talk(items)
+
         # Never end a block on talk: it would leave the hosts introducing
         # something that is not there, and then dead air.
         while items and items[-1]["kind"] != "song":
@@ -704,6 +706,32 @@ def _clean_patter(text: str, max_words: int) -> str:
     if len(words) > max_words + 15:
         text = " ".join(words[:max_words]).rstrip(",;: ") + "."
     return text
+
+
+def _drop_consecutive_talk(items: list[dict]) -> list[dict]:
+    """Never let two spoken items run back to back.
+
+    The prompt asks the model to interleave talk with songs, but nothing
+    stops it front-loading an opening link, a music note, a weather moment
+    and a whole conversation before playing a single track -- which is
+    exactly what happens once several "extra" segment types are possible in
+    one hour and the model just writes all of them first. The fallback
+    planner can't do this: it inserts one song right after every talk item,
+    structurally. The LLM plan gets that same guarantee here instead of
+    just a prompt asking nicely for it.
+
+    Dropping the excess is safe -- the hour just has one fewer aside. Trying
+    to fix it by moving songs earlier would still leave a back-announce
+    pointing at a track that no longer plays next to it.
+    """
+    fixed: list[dict] = []
+    for item in items:
+        if item["kind"] != "song" and fixed and fixed[-1]["kind"] != "song":
+            log.info("dropping a %s item stacked on top of another talk item",
+                     item["kind"])
+            continue
+        fixed.append(item)
+    return fixed
 
 
 def _mood_note(mood: str, focus_artists: list[str] | None) -> str:

@@ -31,6 +31,12 @@ Rules you must not break:
   you can, but never place two songs by the same artist next to each other.
 - Every spoken item carries a "host" field naming who says it, spelled exactly
   as above. Vary who speaks; do not give every link to the same host.
+- Never place two spoken items back to back, of any kind. A link, a
+  conversation, a weather moment and a music note all count as "spoken" --
+  always put at least one song between any two of them. Do not write the
+  hour's opening link, a music note, a weather moment and a conversation all
+  before the first song just because the plan below asks for several of
+  them; spread them out across the songs instead, one at a time.
 - Do not greet the listener by name, and never mention traffic, sponsors,
   phone-ins or contests. This station has none of those.
 - Do not mention the time except in the first line of the hour.

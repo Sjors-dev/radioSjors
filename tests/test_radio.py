@@ -34,7 +34,8 @@ from airadio.util import dedupe_key, normalize, safe_filename
 from airadio.weather import Weather
 from airadio.brain.intent import _rules
 from airadio.brain.llm import LLM, extract_json
-from airadio.brain.planner import (Planner, _clean_exchange, _spoken_number,
+from airadio.brain.planner import (Planner, _clean_exchange,
+                                   _drop_consecutive_talk, _spoken_number,
                                    _template_weather)
 
 BASE_CONFIG = yaml.safe_load((Path(__file__).resolve().parent.parent
@@ -1836,6 +1837,60 @@ class TestBanterValidation(RadioTestCase):
                    {"host": "Nina", "text": "Night."}]}])
         items = self.planner._validate(raw, self.candidates, 6, ["Ray", "Nina"])
         self.assertEqual(items[-1]["kind"], "song")
+
+    def test_stacked_talk_items_collapse_to_one(self):
+        # The reported bug: the model wrote an opening link, another link, a
+        # conversation, then five more links before ever reaching a song --
+        # the site's "up next" showed eight straight talk items and no music
+        # at all.
+        items = self._validate([
+            {"type": "patter", "host": "Nina", "text": "Evening."},
+            {"type": "patter", "host": "Nina", "text": "Settling in."},
+            {"type": "banter", "lines": [
+                {"host": "Ray", "text": "Good one."},
+                {"host": "Nina", "text": "Always is."}]},
+            {"type": "patter", "host": "Ray", "text": "One."},
+            {"type": "patter", "host": "Nina", "text": "Two."},
+            {"type": "patter", "host": "Ray", "text": "Three."},
+            {"type": "patter", "host": "Nina", "text": "Four."},
+            {"type": "patter", "host": "Ray", "text": "Five."},
+        ])
+        kinds = [item["kind"] for item in items]
+        # Only the first of that whole run should have survived; everything
+        # else in the pile-up gets dropped, not the songs around it.
+        talk_run = kinds[6:-1]  # between the six opening songs and the last
+        self.assertEqual(len(talk_run), 1, kinds)
+        self.assertEqual(kinds.count("song"), 7)
+
+    def test_drop_consecutive_talk_keeps_a_normal_alternating_plan(self):
+        items = [
+            {"kind": "patter", "text": "a"},
+            {"kind": "song", "track": {}},
+            {"kind": "banter", "lines": []},
+            {"kind": "song", "track": {}},
+            {"kind": "patter", "text": "b"},
+            {"kind": "song", "track": {}},
+        ]
+        self.assertEqual(_drop_consecutive_talk(items), items)
+
+    def test_drop_consecutive_talk_keeps_the_first_of_a_run(self):
+        items = [
+            {"kind": "song", "track": {}},
+            {"kind": "patter", "text": "first"},
+            {"kind": "banter", "lines": []},
+            {"kind": "patter", "text": "third"},
+            {"kind": "song", "track": {}},
+        ]
+        fixed = _drop_consecutive_talk(items)
+        self.assertEqual([item["kind"] for item in fixed],
+                         ["song", "patter", "song"])
+        self.assertEqual(fixed[1]["text"], "first")
+
+    def test_drop_consecutive_talk_handles_an_all_talk_list(self):
+        items = [{"kind": "patter", "text": "a"}, {"kind": "banter", "lines": []},
+                {"kind": "patter", "text": "c"}]
+        self.assertEqual(_drop_consecutive_talk(items),
+                         [{"kind": "patter", "text": "a"}])
 
 
 class TestBanterQueueing(RadioTestCase):
