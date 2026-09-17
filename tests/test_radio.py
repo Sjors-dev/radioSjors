@@ -9,6 +9,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import time
 import unittest
 import wave
 from datetime import datetime
@@ -686,6 +687,40 @@ class TestDiscoveryBreadth(RadioTestCase):
         row = self.db.one("SELECT attempts, status FROM candidates WHERE artist='Artist'")
         self.assertEqual(row["attempts"], 0)
         self.assertEqual(row["status"], "new")
+
+    def test_lock_from_a_dead_process_is_cleared(self):
+        # A download killed mid-flight (Ctrl-C, pkill, reboot) never releases
+        # its lock. Waiting out the 30 minute staleness timeout behind a
+        # process that no longer exists blocked a whole bootstrap run.
+        self.downloader.lock_path.write_text("999999", encoding="utf-8")
+        self.downloader._lock_holder_alive = lambda: False
+        self.assertTrue(self.downloader._acquire_lock())
+
+    def test_lock_from_a_live_process_is_respected(self):
+        self.downloader.lock_path.write_text("999999", encoding="utf-8")
+        self.downloader._lock_holder_alive = lambda: True
+        self.assertFalse(self.downloader._acquire_lock())
+
+    def test_unknown_holder_falls_back_to_the_age_check(self):
+        self.downloader.lock_path.write_text("999999", encoding="utf-8")
+        self.downloader._lock_holder_alive = lambda: None
+        self.assertFalse(self.downloader._acquire_lock(), "a fresh lock holds")
+
+        import os as os_module
+        old = time.time() - 4000
+        os_module.utime(self.downloader.lock_path, (old, old))
+        self.assertTrue(self.downloader._acquire_lock(), "an old lock expires")
+
+    def test_corrupt_lock_file_does_not_block_forever(self):
+        self.downloader.lock_path.write_text("not a pid", encoding="utf-8")
+        self.assertFalse(self.downloader._lock_holder_alive())
+        self.assertTrue(self.downloader._acquire_lock())
+
+    def test_our_own_stale_lock_is_reclaimed(self):
+        import os as os_module
+        self.downloader.lock_path.write_text(str(os_module.getpid()),
+                                             encoding="utf-8")
+        self.assertTrue(self.downloader._acquire_lock())
 
     def test_lock_contention_is_flagged_busy_not_merely_failed(self):
         self.downloader.lock_path.write_text("999999", encoding="utf-8")

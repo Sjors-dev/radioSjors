@@ -57,13 +57,42 @@ class Downloader:
 
     # -- locking ------------------------------------------------------------
 
+    def _lock_holder_alive(self) -> bool | None:
+        """Is the process named in the lock file still running?
+
+        None means "cannot tell" (not POSIX, unreadable file), in which case
+        the caller falls back to the age check.
+        """
+        try:
+            pid = int(self.lock_path.read_text(encoding="utf-8").strip())
+        except Exception:
+            return False  # empty or corrupt lock holds nothing
+        if pid == os.getpid():
+            return False  # our own leftover from an earlier run
+        if os.name != "posix":
+            return None
+        try:
+            os.kill(pid, 0)  # signal 0 only tests for existence
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True  # alive, just owned by someone else
+        except OSError:
+            return None
+        return True
+
     def _acquire_lock(self) -> bool:
         try:
             if self.lock_path.exists():
+                alive = self._lock_holder_alive()
                 age = time.time() - self.lock_path.stat().st_mtime
-                if age < 1800:
+                if alive is True or (alive is None and age < 1800):
                     return False
-                log.warning("clearing stale download lock (%.0fs old)", age)
+                # A download killed mid-flight (Ctrl-C, pkill, a reboot) never
+                # gets to release its lock. Without this check everything else
+                # waits out the full staleness timeout behind a dead process.
+                log.warning("clearing stale download lock (%.0fs old, holder is "
+                            "gone)", age)
                 self.lock_path.unlink(missing_ok=True)
             self.lock_path.write_text(str(os.getpid()), encoding="utf-8")
             return True
