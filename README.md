@@ -160,6 +160,7 @@ it when the LLM is down:
 | `!ban` | ban whatever is playing now |
 | `!ban <artist> - <title>` | ban a named track |
 | `!banned` | list what is banned |
+| `!requeue` | clear the planned queue and rebuild it now |
 | `!help` | the list, in chat |
 
 Banning moves the audio to `banned/` rather than deleting it, marks it in the
@@ -167,6 +168,12 @@ database, drops it from anything already queued, skips it if it's on air, and
 stops the downloader ever fetching it again. The file has to leave `library/`
 because the safety playlist reads that folder directly. Reversible with
 `main.py unban "<artist>" "<title>"`.
+
+`!requeue` only touches the AI-planned tier — a track requested by name plays
+regardless — and never changes the mood itself, only what gets planned around
+it. Useful right after a mood shift: with `bot.replan_on_vibe: false` a mood
+change otherwise waits for the next hour, and even with it `true`, a plan can
+just come out weaker than you'd like and be worth a second attempt.
 
 ---
 

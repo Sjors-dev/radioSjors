@@ -1022,6 +1022,101 @@ class TestChatBackfillIntegration(RadioTestCase):
         self.assertIn("not set up", reply)
 
 
+class TestRequeueCommand(RadioTestCase):
+    """The !requeue Discord command: clear the AI queue and rebuild it now,
+    wired through a real Runner with the stream engine stubbed out."""
+
+    def setUp(self):
+        super().setUp()
+        from airadio.runner import Runner
+
+        self.runner = Runner(self.cfg)
+        self.runner.ls = _StubLiquidsoap()
+        self.seed_library(artists=8, per_artist=4)
+
+    def _build_initial_block(self) -> None:
+        track = dict(self.runner.db.query("SELECT * FROM tracks LIMIT 1")[0])
+        self.runner.queue.build_block({
+            "items": [{"kind": "song", "track": track}],
+            "source": "test", "mood_name": "night", "show_note": "",
+        })
+
+    def test_requeue_drops_ready_ai_items_and_rebuilds(self):
+        self._build_initial_block()
+        blocks_before = self.runner.db.one(
+            "SELECT COUNT(*) AS n FROM blocks")["n"]
+
+        reply = self.runner._handle_requeue_request()
+
+        self.assertIn("Cleared", reply)
+        blocks_after = self.runner.db.one(
+            "SELECT COUNT(*) AS n FROM blocks")["n"]
+        self.assertEqual(blocks_after, blocks_before + 1,
+                         "a genuinely fresh block should have been planned, "
+                         "not just left alone")
+        fresh = self.runner.db.one(
+            "SELECT COUNT(*) AS n FROM queue_items WHERE tier='ai' AND "
+            "status IN ('ready', 'pending')")
+        # The fallback planner fills a real hour from the 32 seeded tracks,
+        # far more than the single placeholder song _build_initial_block
+        # queued -- proof the old, thin block was replaced, not added to.
+        self.assertGreater(fresh["n"], 1)
+
+    def test_requeue_reports_how_many_it_dropped(self):
+        self._build_initial_block()
+        dropped_count = self.runner.db.one(
+            "SELECT COUNT(*) AS n FROM queue_items WHERE tier='ai' AND "
+            "status='ready'")["n"]
+        reply = self.runner._handle_requeue_request()
+        self.assertIn(f"Cleared {dropped_count}", reply)
+
+    def test_requeue_never_touches_the_request_tier(self):
+        track = dict(self.runner.db.query("SELECT * FROM tracks LIMIT 1")[0])
+        self.runner.queue.enqueue_request(track)
+        self._build_initial_block()
+
+        self.runner._handle_requeue_request()
+
+        still_queued = self.runner.db.one(
+            "SELECT COUNT(*) AS n FROM queue_items WHERE tier='request' AND "
+            "status='ready'")
+        self.assertEqual(still_queued["n"], 1,
+                         "a track the listener explicitly asked for must "
+                         "survive a requeue")
+
+    def test_requeue_does_not_change_the_mood(self):
+        self.runner.planner.set_mood("late-night jazz")
+        self.runner._handle_requeue_request()
+        self.assertEqual(self.runner.planner.current_mood(), "late-night jazz")
+
+    def test_requeue_on_an_empty_library_says_so_without_crashing(self):
+        # Simulate an empty library without a second Runner/db, which would
+        # just see the same tracks seed_library already put there.
+        self.runner.db.execute("UPDATE tracks SET missing=1")
+        reply = self.runner._handle_requeue_request()
+        self.assertIn("safety playlist", reply)
+
+    def test_handle_request_dispatches_requeue_without_classifying(self):
+        # The whole point of setting kind='requeue' at insert time: this is
+        # deterministic and unambiguous, so no LLM call should ever happen
+        # for it, unlike free-text chat.
+        import airadio.runner as runner_module
+        original = runner_module.classify
+
+        def boom(*args, **kwargs):
+            raise AssertionError("classify() must not run for a "
+                                 "pre-classified requeue request")
+
+        runner_module.classify = boom
+        try:
+            reply = self.runner._handle_request(
+                {"kind": "requeue", "text": "requeue the ai queue",
+                 "user": "tester"})
+        finally:
+            runner_module.classify = original
+        self.assertIn("Cleared", reply)
+
+
 class TestLibrary(RadioTestCase):
     def test_scan_indexes_files(self):
         self.seed_library(artists=3, per_artist=4)

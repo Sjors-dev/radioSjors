@@ -39,6 +39,7 @@ Commands:
   `!ban`           ban whatever is playing now
   `!ban <track>`   ban a named track
   `!banned`        list what is banned
+  `!requeue`       clear the planned queue and rebuild it now
   `!help`          this
 
 `!ban` moves the audio to `banned/` rather than deleting it, so a mistake is
@@ -120,15 +121,45 @@ class RadioBot(discord.Client):
                 f"Mood: {current}" if current else
                 "Mood: following the time-of-day schedule.")
             return
+        if lowered in ("!requeue", "!rebuild", "!replan"):
+            # Deterministic and unambiguous, so this is given a kind up
+            # front rather than sent through the classifier -- there is
+            # nothing to interpret about it, and no reason to spend an LLM
+            # call finding that out.
+            await self._submit(message, "requeue the ai queue", kind="requeue")
+            return
+
         if lowered.startswith("!mood "):
             text = text[len("!mood "):].strip()
 
-        request_id = self.db.execute(
-            "INSERT INTO chat_requests(user, text, status, created_at) "
-            "VALUES(?,?,?,?)",
-            (str(message.author.display_name), text, "new", time.time()),
-        )
-        log.info("queued chat request %s: %r", request_id, text[:100])
+        await self._submit(message, text)
+
+    # -- helpers ------------------------------------------------------------
+
+    async def _submit(self, message: discord.Message, text: str,
+                      kind: str | None = None) -> None:
+        """Queue a request for the brain, and wait for its answer if
+        confirmations are on.
+
+        Shared by free-text chat and any bang-command that needs the brain's
+        own machinery (planning, downloading) rather than something cheap
+        enough to answer here directly.
+        """
+        if kind:
+            request_id = self.db.execute(
+                "INSERT INTO chat_requests(user, text, kind, status, "
+                "created_at) VALUES(?,?,?,?,?)",
+                (str(message.author.display_name), text, kind, "new",
+                 time.time()),
+            )
+        else:
+            request_id = self.db.execute(
+                "INSERT INTO chat_requests(user, text, status, created_at) "
+                "VALUES(?,?,?,?)",
+                (str(message.author.display_name), text, "new", time.time()),
+            )
+        log.info("queued chat request %s (kind=%s): %r", request_id, kind,
+                 text[:100])
 
         try:
             await message.add_reaction("\N{HOURGLASS WITH FLOWING SAND}")
@@ -141,8 +172,6 @@ class RadioBot(discord.Client):
         note = await self._await_result(request_id)
         if note:
             await message.channel.send(note[:1900])
-
-    # -- helpers ------------------------------------------------------------
 
     async def _await_result(self, request_id: int) -> str:
         """Poll for the brain's answer without blocking the event loop."""

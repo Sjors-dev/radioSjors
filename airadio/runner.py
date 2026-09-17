@@ -259,6 +259,12 @@ class Runner:
             )
 
     def _handle_request(self, row: dict) -> str:
+        if row.get("kind") == "requeue":
+            # Set directly by the bot for the explicit !requeue command --
+            # deterministic and unambiguous, so there is no reason to spend
+            # an LLM call classifying it.
+            return self._handle_requeue_request()
+
         intent = classify(self.llm, row["text"])
         kind = intent["kind"]
         log.info("chat (%s) from %s: %r -> %s", intent.get("source"),
@@ -410,17 +416,48 @@ class Runner:
         self.planner.set_mood(mood)
 
         if bool(self.cfg.get("bot.replan_on_vibe", True)):
-            dropped = self.queue.clear_pending("ai")
+            dropped, _ok = self._rebuild_ai_queue()
             log.info("vibe shift: dropped %d unplayed items, re-planning", dropped)
-            plan = self.planner.plan_block(airs_in=self.queue.ready_seconds(),
-                                           speaking_hosts=self.tts.hosts)
-            if plan.get("items"):
-                self.queue.build_block(plan)
             extra = (f" Grabbed a few more {', '.join(filled)} tracks first."
                     if filled else "")
             return (f"Shifting to: {mood}. Takes effect within a track or two "
                     f"(a couple are already queued up).{extra}")
         return f"Shifting to: {mood} from the next block."
+
+    def _handle_requeue_request(self) -> str:
+        """Clear the AI-planned queue and plan a fresh block right now,
+        around whatever mood is currently in effect.
+
+        A separate, explicit action from setting a mood -- the two are often
+        used together (bot.replan_on_vibe off would otherwise leave a mood
+        shift waiting for the next hour, or a replan just came out weak),
+        but this works regardless of what prompted it, and never touches the
+        mood itself.
+        """
+        dropped, ok = self._rebuild_ai_queue()
+        log.info("requeue: dropped %d unplayed items, re-planning", dropped)
+        if not ok:
+            return (f"Cleared {dropped} queued item(s), but the fresh plan "
+                    "came back empty - the safety playlist will cover until "
+                    "the next attempt.")
+        return (f"Cleared {dropped} queued item(s) and planned a fresh hour. "
+                "Takes effect within a track or two.")
+
+    def _rebuild_ai_queue(self) -> tuple[int, bool]:
+        """Drop whatever is queued for the AI tier and plan a fresh block.
+
+        Returns (how many unplayed items were dropped, whether a usable plan
+        came back). Never touches the request tier -- a track the listener
+        explicitly asked for by name should survive regardless of what else
+        changes.
+        """
+        dropped = self.queue.clear_pending("ai")
+        plan = self.planner.plan_block(airs_in=self.queue.ready_seconds(),
+                                       speaking_hosts=self.tts.hosts)
+        if plan.get("items"):
+            self.queue.build_block(plan)
+            return dropped, True
+        return dropped, False
 
     def _backfill_named_artists(self, mood: str) -> list[str]:
         """Top up any library artist the mood names but is thin on.
