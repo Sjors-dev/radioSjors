@@ -151,6 +151,13 @@ class LastFM:
 
         # Widen to every similar artist we can reach before fetching a single
         # track, so the artist list is broad before the track list is deep.
+        # Enough artists to fill the request at the per-artist cap, with some
+        # margin -- and capped. Every artist costs a throttled Last.fm call, so
+        # a large ask is served by several passes rather than one long silent
+        # one.
+        needed = -(-want // max(1, per_artist))   # ceiling division
+        artist_target = max(12, min(60, needed + 8))
+
         artists: list[str] = []
         seen_artists: set[str] = set()
         shuffled = list(seeds)
@@ -162,9 +169,7 @@ class LastFM:
                 if key and key not in seen_artists:
                     seen_artists.add(key)
                     artists.append(artist)
-            # Enough artists to fill the request several times over at the
-            # per-artist cap, without hammering Last.fm for all of them.
-            if len(artists) >= max(12, want):
+            if len(artists) >= artist_target:
                 break
 
         random.shuffle(artists)

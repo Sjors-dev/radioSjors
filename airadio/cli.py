@@ -125,12 +125,17 @@ def cmd_bootstrap(args, cfg: Config) -> int:
     print(f"growing the library to {target} tracks "
           f"(currently {app.library.count()}); one download at a time")
 
-    app.downloader.seed_candidates(wanted=max(40, target * 2))
+    # Seeded in batches. Each pass is a run of throttled Last.fm calls, and the
+    # loop re-seeds whenever it runs dry, so asking for hundreds up front only
+    # buys minutes of silence before the first download.
+    print("  finding candidates on Last.fm...", flush=True)
+    app.downloader.seed_candidates(wanted=60)
     failures = 0
     while app.library.count() < target and failures < 15:
         result = app.downloader.fetch_next_candidate()
         if result is None:
-            if app.downloader.seed_candidates(wanted=40) == 0:
+            print("  finding more candidates...", flush=True)
+            if app.downloader.seed_candidates(wanted=60) == 0:
                 print("ran out of candidates from Last.fm")
                 break
             continue
