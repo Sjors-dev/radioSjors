@@ -17,6 +17,10 @@ Rules you must not break:
 - Patter lines are spoken aloud by a text-to-speech voice. Write plain spoken
   prose: no markdown, no emoji, no stage directions, no asterisks, no bullet
   points, no URLs, no numbers written as digits when a word reads better.
+- Write in SHORT sentences. Two or three of them, each under about twelve
+  words, ending in a full stop. A synthetic voice has no breath control, so a
+  long winding sentence comes out flat and rushed, while short ones land. Use
+  full stops rather than commas wherever the sense allows.
 - Do not play the same artist again within {artist_spacing} songs. No back-to-back
   pairs from one artist, no "two in a row" sets. Spread each artist out across
   the hour. If the candidate list is too small to manage that, get as close as

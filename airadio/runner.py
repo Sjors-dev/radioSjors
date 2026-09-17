@@ -375,7 +375,8 @@ class Runner:
 
     def _download_gap(self) -> float:
         per_hour = max(1, int(self.cfg.get("discovery.downloads_per_hour", 3)))
-        return max(120.0, 3600.0 / per_hour)
+        floor = float(self.cfg.get("discovery.min_download_gap_seconds", 120))
+        return max(floor, 3600.0 / per_hour)
 
     def _download_one(self) -> None:
         if not self.lastfm.enabled:

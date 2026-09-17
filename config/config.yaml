@@ -44,8 +44,13 @@ tts:
   engine: piper_cli
   # Path to the .onnx voice model. install.sh downloads this one.
   voice_model: /opt/ai-radio/voices/en_US-amy-medium.onnx
-  # Piper speed; 1.0 = normal, higher = slower.
-  length_scale: 1.0
+  # Piper speed; 1.0 = normal, higher = slower. Stay near 1.0: slowing the
+  # voice down does not make it sound more natural, it sounds sedated.
+  # Natural pacing comes from short sentences and the pause below.
+  length_scale: 1.05
+  # Seconds of silence after each sentence. 0.3-0.5 reads like someone
+  # taking a breath; this is the single biggest win for sounding human.
+  sentence_silence: 0.4
   # Normalise patter loudness to roughly match music (needs ffmpeg).
   loudnorm: true
   # Give up on a render after this many seconds (Celeron safety valve).
@@ -141,8 +146,13 @@ discovery:
     - "The Cure"
     - "Louis Armstrong"
     - ""
-  # New tracks fetched per hour in the background.
+  # New tracks fetched per hour in the background. Raise it while you are
+  # filling the library out, then drop it back so the station is not
+  # constantly downloading on two cores.
   downloads_per_hour: 3
+  # Hard floor between downloads regardless of the rate above, so a big
+  # number cannot starve the stream. Lower it for a fast bulk fill.
+  min_download_gap_seconds: 120
   # Stop growing once the library is this big (0 = no cap).
   library_target: 1200
   # Minimum tracks before the planner bothers with AI programming.

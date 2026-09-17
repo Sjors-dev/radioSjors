@@ -35,6 +35,9 @@ class TTS:
         self.engine = str(cfg.get("tts.engine", "piper_cli")).lower()
         self.voice_model = str(cfg.get("tts.voice_model", "") or "")
         self.length_scale = float(cfg.get("tts.length_scale", 1.0))
+        # A beat between sentences. Does more for how natural a line sounds
+        # than slowing the whole voice down, which just sounds sedated.
+        self.sentence_silence = float(cfg.get("tts.sentence_silence", 0.0))
         self.timeout = int(cfg.get("tts.timeout_seconds", 180))
         self.loudnorm = bool(cfg.get("tts.loudnorm", True))
         self.out_dir = cfg.path("queue")
@@ -107,8 +110,11 @@ class TTS:
                       self._failures)
             return None
 
+        # Every setting that changes how the line sounds is in the key, so
+        # tuning the voice never replays a stale render.
         digest = hashlib.sha1(
-            f"{self.engine}|{self.voice_model}|{self.length_scale}|{text}".encode("utf-8")
+            f"{self.engine}|{self.voice_model}|{self.length_scale}"
+            f"|{self.sentence_silence}|{text}".encode("utf-8")
         ).hexdigest()[:12]
         target = self.out_dir / f"{name_hint}-{digest}.wav"
         if target.exists() and target.stat().st_size > 1000:
@@ -167,11 +173,37 @@ class TTS:
                 command = base + ["-m", self.voice_model, output_flag, str(out_path)]
                 if length_flag and abs(self.length_scale - 1.0) > 0.001:
                     command += [length_flag, str(self.length_scale)]
+                    # Match the flag style piper accepted for length.
+                    silence_flag = ("--sentence_silence" if "_" in length_flag
+                                    else "--sentence-silence")
+                elif self._length_flag:
+                    silence_flag = ("--sentence_silence"
+                                    if "_" in self._length_flag
+                                    else "--sentence-silence")
+                else:
+                    silence_flag = None
+
+                if silence_flag and self.sentence_silence > 0:
+                    command += [silence_flag, str(self.sentence_silence)]
+
                 result = self._run(command, text, out_path)
                 if result is not None:
                     self._output_flag = output_flag
                     self._length_flag = length_flag
                     return result
+
+                # A pause between sentences is a nicety, not worth failing for.
+                if silence_flag and self.sentence_silence > 0:
+                    retry = [part for part in command
+                             if part not in (silence_flag, str(self.sentence_silence))]
+                    result = self._run(retry, text, out_path)
+                    if result is not None:
+                        self._output_flag = output_flag
+                        self._length_flag = length_flag
+                        self.sentence_silence = 0.0
+                        log.info("piper rejected %s, continuing without pauses",
+                                 silence_flag)
+                        return result
         return None
 
     def _run(self, command: list[str], text: str, out_path: Path) -> Path | None:
