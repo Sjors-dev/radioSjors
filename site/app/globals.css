@@ -1,0 +1,740 @@
+/* ==========================================================================
+   A private radio station, on the internet, at night.
+
+   The look is late-night pirate radio: cheap ink on cheap paper, a hot
+   accent, type too big for the space it is in. Deliberately not a dashboard.
+   ========================================================================== */
+
+:root {
+  --ink: #0c0a0b;
+  --ink-soft: #171416;
+  --ink-line: #2a2427;
+  --paper: #f2e9d8;
+  --paper-dim: #c9bfae;
+  --hot: #ff3b1f;
+  --acid: #e6ff4a;
+  --cool: #58e0ff;
+  --gutter: 16px;
+
+  --display: var(--font-display), "Arial Black", sans-serif;
+  --mono: var(--font-mono), ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--mono);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+body::after {
+  /* Grain. Stops the flat colour reading like a template. */
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  pointer-events: none;
+  opacity: 0.32;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+}
+
+a {
+  color: inherit;
+}
+
+/* -- shell ---------------------------------------------------------------- */
+
+.shell {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 var(--gutter) 96px;
+}
+
+/* -- ticker --------------------------------------------------------------- */
+
+.ticker {
+  position: relative;
+  overflow: hidden;
+  border-bottom: 2px solid var(--paper);
+  background: var(--hot);
+  color: var(--ink);
+  font-family: var(--display);
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  font-size: 13px;
+  padding: 7px 0;
+  white-space: nowrap;
+}
+
+.ticker__track {
+  display: inline-block;
+  padding-left: 100%;
+  animation: slide 42s linear infinite;
+}
+
+.ticker__track span {
+  padding: 0 1.4rem;
+}
+
+@keyframes slide {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(-100%, 0, 0);
+  }
+}
+
+/* -- masthead ------------------------------------------------------------- */
+
+.masthead {
+  padding: 40px 0 26px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.wordmark {
+  font-family: var(--display);
+  font-weight: 800;
+  font-size: clamp(2.6rem, 11vw, 6.4rem);
+  line-height: 0.84;
+  letter-spacing: -0.045em;
+  text-transform: uppercase;
+  margin: 0;
+  max-width: 11ch;
+}
+
+.wordmark em {
+  font-style: normal;
+  color: var(--hot);
+}
+
+.masthead__aside {
+  text-align: right;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--paper-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.onair {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 2px solid var(--hot);
+  color: var(--hot);
+  padding: 5px 11px;
+  font-family: var(--display);
+  font-weight: 800;
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  margin-bottom: 10px;
+}
+
+.onair.is-off {
+  border-color: var(--ink-line);
+  color: var(--paper-dim);
+}
+
+.onair__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.onair.is-off .onair__dot {
+  animation: none;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.15;
+  }
+}
+
+/* -- layout --------------------------------------------------------------- */
+
+.deck {
+  display: grid;
+  grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 18px;
+  margin-top: 18px;
+}
+
+/* -- blocks --------------------------------------------------------------- */
+
+.block {
+  border: 2px solid var(--paper);
+  background: var(--ink-soft);
+  padding: 18px;
+  min-width: 0;
+}
+
+.block--paper {
+  background: var(--paper);
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
+.block--hot {
+  background: var(--hot);
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
+.block__label {
+  font-family: var(--display);
+  font-weight: 800;
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  margin: 0 0 14px;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.block__label span:last-child {
+  font-family: var(--mono);
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  opacity: 0.6;
+}
+
+/* -- now playing ---------------------------------------------------------- */
+
+.now {
+  display: flex;
+  flex-direction: column;
+  min-height: 300px;
+}
+
+.now__title {
+  font-family: var(--display);
+  font-weight: 800;
+  font-size: clamp(1.7rem, 4.6vw, 3.1rem);
+  line-height: 0.96;
+  letter-spacing: -0.03em;
+  margin: 0 0 8px;
+  overflow-wrap: anywhere;
+}
+
+.now__artist {
+  font-size: clamp(0.95rem, 2vw, 1.15rem);
+  text-transform: uppercase;
+  letter-spacing: 0.13em;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.now__spacer {
+  flex: 1;
+  min-height: 22px;
+}
+
+.now__meter {
+  height: 12px;
+  border: 2px solid currentColor;
+  margin-top: 14px;
+  position: relative;
+  overflow: hidden;
+}
+
+.now__meter i {
+  display: block;
+  height: 100%;
+  background: currentColor;
+  transition: width 1s linear;
+}
+
+.now__times {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  margin-top: 6px;
+  opacity: 0.75;
+}
+
+.now--talk .now__title {
+  font-size: clamp(1.4rem, 3.4vw, 2.3rem);
+}
+
+.talkbadge {
+  display: inline-block;
+  background: var(--ink);
+  color: var(--acid);
+  font-family: var(--display);
+  font-weight: 800;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  padding: 4px 9px;
+  margin-bottom: 12px;
+}
+
+/* -- player --------------------------------------------------------------- */
+
+.player {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.player__row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.playbtn {
+  flex: none;
+  width: 62px;
+  height: 62px;
+  border-radius: 50%;
+  border: 2px solid var(--ink);
+  background: var(--acid);
+  color: var(--ink);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: transform 0.12s ease;
+}
+
+.playbtn:hover {
+  transform: scale(1.06);
+}
+
+.playbtn:active {
+  transform: scale(0.96);
+}
+
+.playbtn svg {
+  width: 22px;
+  height: 22px;
+  fill: currentColor;
+}
+
+.playbtn[disabled] {
+  opacity: 0.45;
+  cursor: wait;
+}
+
+.player__state {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  line-height: 1.6;
+}
+
+.volume {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 8px;
+  background: var(--ink);
+  border: 2px solid var(--ink);
+  cursor: pointer;
+}
+
+.volume::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 20px;
+  background: var(--acid);
+  border: 2px solid var(--ink);
+}
+
+.volume::-moz-range-thumb {
+  width: 14px;
+  height: 18px;
+  border-radius: 0;
+  background: var(--acid);
+  border: 2px solid var(--ink);
+}
+
+.bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 26px;
+}
+
+.bars i {
+  width: 4px;
+  background: currentColor;
+  height: 30%;
+}
+
+.bars.is-live i {
+  animation: bounce 900ms ease-in-out infinite;
+}
+
+.bars i:nth-child(2) {
+  animation-delay: 120ms;
+}
+.bars i:nth-child(3) {
+  animation-delay: 240ms;
+}
+.bars i:nth-child(4) {
+  animation-delay: 60ms;
+}
+.bars i:nth-child(5) {
+  animation-delay: 300ms;
+}
+.bars i:nth-child(6) {
+  animation-delay: 180ms;
+}
+
+@keyframes bounce {
+  0%,
+  100% {
+    height: 22%;
+  }
+  50% {
+    height: 100%;
+  }
+}
+
+.embed {
+  width: 100%;
+  border: 0;
+  height: 140px;
+  background: var(--ink);
+}
+
+/* -- lists ---------------------------------------------------------------- */
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.list li {
+  display: flex;
+  gap: 12px;
+  padding: 9px 0;
+  border-top: 1px solid var(--ink-line);
+  font-size: 13px;
+  align-items: baseline;
+}
+
+.block--paper .list li {
+  border-color: rgba(12, 10, 11, 0.16);
+}
+
+.list li:first-child {
+  border-top: 0;
+}
+
+.list__index {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  opacity: 0.45;
+  flex: none;
+  width: 18px;
+}
+
+.list__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.list__title {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.list__sub {
+  display: block;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.55;
+  margin-top: 2px;
+}
+
+.list__meta {
+  flex: none;
+  font-size: 11px;
+  opacity: 0.5;
+}
+
+.list li.is-talk .list__title {
+  color: var(--acid);
+}
+
+.block--paper .list li.is-talk .list__title {
+  color: var(--hot);
+}
+
+/* -- odds and ends -------------------------------------------------------- */
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  text-align: center;
+}
+
+.stat b {
+  display: block;
+  font-family: var(--display);
+  font-weight: 800;
+  font-size: clamp(1.5rem, 4vw, 2.2rem);
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.stat span {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  opacity: 0.6;
+  margin-top: 5px;
+}
+
+.note {
+  font-size: 14px;
+  line-height: 1.55;
+  margin: 0;
+}
+
+.note--quiet {
+  opacity: 0.6;
+  font-size: 12px;
+}
+
+.chip {
+  display: inline-block;
+  border: 1px solid currentColor;
+  padding: 3px 8px;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  margin: 0 6px 6px 0;
+}
+
+.weather {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.weather b {
+  font-family: var(--display);
+  font-weight: 800;
+  font-size: 2.6rem;
+  line-height: 1;
+  letter-spacing: -0.03em;
+}
+
+.stamp {
+  position: relative;
+  width: 124px;
+  height: 124px;
+  margin-left: auto;
+}
+
+.stamp svg {
+  width: 100%;
+  height: 100%;
+  animation: spin 22s linear infinite;
+}
+
+.stamp text {
+  font-family: var(--mono);
+  font-size: 9.2px;
+  /* Spacing is set by textLength on the element, so the phrase closes the
+     ring exactly. A letter-spacing here would fight it. */
+  fill: var(--paper-dim);
+  text-transform: uppercase;
+}
+
+.stamp__core {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-family: var(--display);
+  font-weight: 800;
+  font-size: 26px;
+  color: var(--hot);
+  pointer-events: none;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.foot {
+  margin-top: 46px;
+  padding-top: 18px;
+  border-top: 2px solid var(--ink-line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--paper-dim);
+}
+
+.offline {
+  border: 2px dashed var(--ink-line);
+  padding: 22px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--paper-dim);
+}
+
+/* -- login ---------------------------------------------------------------- */
+
+.gate {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: var(--gutter);
+}
+
+.gate__card {
+  width: min(420px, 100%);
+  border: 2px solid var(--paper);
+  background: var(--ink-soft);
+  padding: 28px;
+}
+
+.gate__card h1 {
+  font-family: var(--display);
+  font-weight: 800;
+  font-size: 2.3rem;
+  line-height: 0.9;
+  letter-spacing: -0.04em;
+  text-transform: uppercase;
+  margin: 0 0 8px;
+}
+
+.gate__card p {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--paper-dim);
+  margin: 0 0 20px;
+}
+
+.field {
+  width: 100%;
+  background: var(--ink);
+  border: 2px solid var(--paper);
+  color: var(--paper);
+  font-family: var(--mono);
+  font-size: 15px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.field:focus {
+  outline: 0;
+  border-color: var(--acid);
+}
+
+.submit {
+  width: 100%;
+  background: var(--hot);
+  color: var(--ink);
+  border: 2px solid var(--ink);
+  font-family: var(--display);
+  font-weight: 800;
+  font-size: 14px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 13px;
+  cursor: pointer;
+}
+
+.submit:hover {
+  background: var(--acid);
+}
+
+.submit[disabled] {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.error {
+  color: var(--hot);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  margin: 10px 0 0;
+}
+
+/* -- small screens -------------------------------------------------------- */
+
+@media (max-width: 860px) {
+  .deck {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .masthead {
+    padding: 26px 0 20px;
+  }
+
+  .masthead__aside {
+    text-align: left;
+  }
+
+  .stamp {
+    display: none;
+  }
+
+  /* A tall editorial card is the point on a desktop. On a phone it is just
+     a screen of nothing between the title and the progress bar. */
+  .now {
+    min-height: 0;
+  }
+
+  .now__spacer {
+    min-height: 40px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ticker__track,
+  .stamp svg,
+  .onair__dot,
+  .bars.is-live i {
+    animation: none;
+  }
+}

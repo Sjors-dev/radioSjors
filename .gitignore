@@ -12,3 +12,10 @@ library/
 queue/
 stream/radio.generated.liq
 config/config.local.yaml
+
+# The website under site/ has its own ignores, but keep these out of the
+# repo from the top too -- a stray `git add -A` from the project root
+# should never sweep in a node_modules tree.
+node_modules/
+.next/
+.vercel
