@@ -153,13 +153,19 @@ discovery:
   # Hard floor between downloads regardless of the rate above, so a big
   # number cannot starve the stream. Lower it for a fast bulk fill.
   min_download_gap_seconds: 120
-  # How many tracks to take from any one artist per discovery pass.
-  # Small is right: two or three from many artists grows a station,
-  # eight from one fills the library with that artist.
+  # How many tracks to take from any one artist PER DISCOVERY PASS. This is
+  # not a library limit -- an artist still builds up over many passes. Small
+  # is right here: two or three from many artists grows a station, eight from
+  # one just fills the library with that artist.
   tracks_per_artist: 3
-  # Hard ceiling on tracks by a single artist in the library. Stops one
-  # name taking over. Chat requests override it. 0 = no ceiling.
+  # Ceiling on tracks by one artist in the library, for artists the station
+  # discovered on its own. Stops a Last.fm neighbour crowding everything out.
   max_tracks_per_artist: 8
+  # The ceiling for artists YOU named in seed_artists above. Much higher on
+  # purpose: the cap exists to stop one name taking over, not to ration the
+  # artists you actually like. Add an artist to seed_artists to say
+  # "more of this one, please".
+  max_tracks_per_seed_artist: 30
   # Stop growing once the library is this big (0 = no cap).
   library_target: 1200
   # Minimum tracks before the planner bothers with AI programming.

@@ -126,8 +126,8 @@ class Library:
             # skip reading tags and hashing. Keeps a periodic rescan of a
             # thousand-track library off a spinning disk essentially free.
             known = self.db.one(
-                "SELECT id, dedupe_key, content_hash, missing FROM tracks "
-                "WHERE path = ?", (rel,))
+                "SELECT id, dedupe_key, content_hash, missing, artist, title "
+                "FROM tracks WHERE path = ?", (rel,))
             # A row marked missing must take the slow path: the file has come
             # back (restored from banned/, a remount, moved by hand) and the
             # row needs clearing, not skipping.
@@ -138,7 +138,15 @@ class Library:
                 except OSError:
                     same_size = False
                 if same_size:
-                    seen_keys.setdefault(known["dedupe_key"], rel)
+                    # Re-key from the stored tags, not the file: normalisation
+                    # rules change, and a stale key means the same track can be
+                    # downloaded again under a different spelling. Costs no IO.
+                    stored_key = dedupe_key(known["artist"], known["title"])
+                    if stored_key != known["dedupe_key"]:
+                        self.db.execute(
+                            "UPDATE tracks SET dedupe_key=? WHERE id=?",
+                            (stored_key, known["id"]))
+                    seen_keys.setdefault(stored_key, rel)
                     seen_hashes.setdefault(known["content_hash"], rel)
                     unchanged += 1
                     continue

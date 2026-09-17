@@ -30,6 +30,10 @@ def normalize(text: str) -> str:
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     text = strip_decorations(text).lower()
     text = text.replace("&", " and ")
+    # Stylised spellings are common in the music the station plays, and the
+    # same act turns up both ways: A$AP Rocky / ASAP Rocky, Joey Bada$$ /
+    # Joey Badass, L$D / LSD. Without this they read as different artists.
+    text = text.replace("$", "s").replace("€", "e").replace("£", "l")
     text = re.sub(r"\bfeat\.?\b.*$", "", text)
     text = re.sub(r"\bft\.?\b.*$", "", text)
     text = _NON_ALNUM.sub(" ", text)

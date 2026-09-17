@@ -95,6 +95,13 @@ class TestUtil(unittest.TestCase):
             dedupe_key("Björk", "Hyperballad (Official Video)"),
         )
 
+    def test_stylised_spellings_match_plain_ones(self):
+        # The same act turns up both ways depending on the source.
+        self.assertEqual(normalize("A$AP Rocky"), normalize("ASAP Rocky"))
+        self.assertEqual(normalize("Joey Bada$$"), normalize("Joey Badass"))
+        self.assertEqual(dedupe_key("A$AP Rocky", "L$D"),
+                         dedupe_key("ASAP Rocky", "LSD"))
+
     def test_dedupe_key_separates_different_tracks(self):
         self.assertNotEqual(dedupe_key("Queen", "One Vision"),
                             dedupe_key("Queen", "One Year of Love"))
@@ -626,7 +633,45 @@ class TestDiscoveryBreadth(RadioTestCase):
         self.assertEqual(len(set(first_pass)), len(first_pass),
                          f"first downloads repeat an artist: {first_pass}")
 
+    def add_tracks(self, artist: str, count: int) -> None:
+        for n in range(count):
+            self.db.execute(
+                "INSERT INTO tracks(path, dedupe_key, title, artist, added_at) "
+                "VALUES(?,?,?,?,?)",
+                (f"/x/{artist}-{n}.mp3", f"{normalize(artist)}|track {n}",
+                 f"Track {n}", artist, 0))
+
+    def test_seed_artists_get_a_higher_ceiling(self):
+        # The cap exists to stop one name crowding everything out, not to
+        # ration the artists the listener explicitly asked for.
+        self.cfg._data["discovery"]["seed_artists"] = ["Kanye West"]
+        self.cfg._data["discovery"]["max_tracks_per_artist"] = 5
+        self.cfg._data["discovery"]["max_tracks_per_seed_artist"] = 30
+        self.assertEqual(self.downloader.artist_cap("Kanye West"), 30)
+        self.assertEqual(self.downloader.artist_cap("Some Neighbour"), 5)
+
+    def test_seed_cap_survives_spelling_differences(self):
+        self.cfg._data["discovery"]["seed_artists"] = ["A$AP Rocky"]
+        self.cfg._data["discovery"]["max_tracks_per_artist"] = 5
+        self.cfg._data["discovery"]["max_tracks_per_seed_artist"] = 30
+        self.assertEqual(self.downloader.artist_cap("ASAP Rocky"), 30)
+
+    def test_a_favourite_keeps_growing_past_the_discovered_cap(self):
+        self.cfg._data["discovery"]["seed_artists"] = ["Kanye West"]
+        self.cfg._data["discovery"]["max_tracks_per_artist"] = 5
+        self.cfg._data["discovery"]["max_tracks_per_seed_artist"] = 30
+        self.add_tracks("Kanye West", 12)
+        self.add_tracks("Some Neighbour", 6)
+        self.assertFalse(self.downloader.artist_is_full("Kanye West"))
+        self.assertTrue(self.downloader.artist_is_full("Some Neighbour"))
+
+    def test_zero_means_no_ceiling(self):
+        self.cfg._data["discovery"]["max_tracks_per_artist"] = 0
+        self.add_tracks("Nobody", 50)
+        self.assertFalse(self.downloader.artist_is_full("Nobody"))
+
     def test_artist_cap_blocks_further_candidates(self):
+        self.cfg._data["discovery"]["seed_artists"] = []
         self.cfg._data["discovery"]["max_tracks_per_artist"] = 2
         for n in range(3):
             self.db.execute(

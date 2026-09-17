@@ -342,11 +342,28 @@ class Downloader:
             "COLLATE NOCASE", (artist,))
         return int(row["n"]) if row else 0
 
+    def artist_cap(self, artist: str) -> int:
+        """How many tracks this artist is allowed in the library.
+
+        An artist you named in seed_artists is one you actually like, so it
+        gets a much higher ceiling than something Last.fm suggested three hops
+        out. The point of the cap was never to ration favourites, only to stop
+        one name crowding everything else out.
+        """
+        seeds = {normalize(name) for name in
+                 (self.cfg.get("discovery.seed_artists", []) or []) if name}
+        if normalize(artist) in seeds:
+            return int(self.cfg.get("discovery.max_tracks_per_seed_artist", 0) or 0)
+        return int(self.cfg.get("discovery.max_tracks_per_artist", 0) or 0)
+
+    def artist_is_full(self, artist: str) -> bool:
+        cap = self.artist_cap(artist)
+        return bool(cap) and self.artist_track_count(artist) >= cap
+
     def seed_candidates(self, wanted: int = 25) -> int:
         """Ask Last.fm for new tracks and stash them as pending candidates."""
         seeds = list(self.cfg.get("discovery.seed_artists", []) or [])
         per_artist = int(self.cfg.get("discovery.tracks_per_artist", 3))
-        cap = int(self.cfg.get("discovery.max_tracks_per_artist", 0) or 0)
 
         # Seed from the library's own artists too, so the station drifts with
         # the listener's taste -- but from the LEAST represented ones. Seeding
@@ -364,9 +381,10 @@ class Downloader:
         skipped_full = 0
         for track in self.lastfm.expand(seeds, want=wanted, per_artist=per_artist):
             key = dedupe_key(track["artist"], track["title"])
-            if cap and self.artist_track_count(track["artist"]) >= cap:
-                # One artist should not be able to take over the library.
-                # A chat request still overrides this; it goes via fetch().
+            if self.artist_is_full(track["artist"]):
+                # One artist should not be able to crowd out everything else.
+                # Seeds get a far higher ceiling, and a chat request overrides
+                # it entirely -- that path goes through fetch().
                 skipped_full += 1
                 continue
             if self.db.one("SELECT 1 FROM tracks WHERE dedupe_key=? AND missing=0", (key,)):
@@ -383,7 +401,7 @@ class Downloader:
             added += 1
         if added or skipped_full:
             log.info("queued %d new download candidates (%d skipped, artist "
-                     "already at the %d-track cap)", added, skipped_full, cap)
+                     "already at its track cap)", added, skipped_full)
         return added
 
     def fetch_next_candidate(self) -> DownloadResult | None:
@@ -393,18 +411,18 @@ class Downloader:
             log.debug("library target of %d reached, not growing", target)
             return None
 
-        cap = int(self.cfg.get("discovery.max_tracks_per_artist", 0) or 0)
         row = self.db.one(
             "SELECT * FROM candidates WHERE status='new' AND attempts < 3 "
             "ORDER BY created_at LIMIT 1"
         )
-        if row is not None and cap and self.artist_track_count(row["artist"]) >= cap:
+        if row is not None and self.artist_is_full(row["artist"]):
             # The cap was clear when this was queued but has filled since.
             self.db.execute(
                 "UPDATE candidates SET status='rejected', note=?, updated_at=? "
                 "WHERE id=?",
-                (f"artist already has {cap} tracks", time.time(), row["id"]))
-            return DownloadResult(False, reason=f"{row['artist']} is at the track cap")
+                (f"artist at its cap of {self.artist_cap(row['artist'])}",
+                 time.time(), row["id"]))
+            return DownloadResult(False, reason=f"{row['artist']} is at its track cap")
         if row is None:
             if self.seed_candidates() == 0:
                 return None
