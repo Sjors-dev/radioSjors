@@ -51,6 +51,10 @@ class SitePublisher:
         self._session = requests.Session()
         self._last_publish = 0.0
         self._last_digest = ""
+        # The fuzzy library lookup scans and normalises every row, which is
+        # real work on two slow cores. The answer cannot change while the same
+        # track is on air, so it is worked out once per track, not per publish.
+        self._resolved: tuple[str, dict | None] = ("", None)
         self._failures = 0
         self._quiet_until = 0.0
 
@@ -125,14 +129,19 @@ class SitePublisher:
                            artist=str(self.cfg.get("station.name", "Radio")))
             return current
 
-        # Try the exact split first. The fuzzy search is there for metadata
-        # that does not match the library cleanly, but on a title like
-        # "Artist 1 - Track 2" it will happily settle on Artist 2.
-        track = None
-        if " - " in text:
-            artist, _, title = text.partition(" - ")
-            track = self.library.has_track(artist.strip(), title.strip())
-        track = track or self.library.find(text)
+        if self._resolved[0] == text:
+            track = self._resolved[1]
+        else:
+            # Try the exact split first. The fuzzy search is there for
+            # metadata that does not match the library cleanly, but on a title
+            # like "Artist 1 - Track 2" it will happily settle on Artist 2.
+            track = None
+            if " - " in text:
+                artist, _, title = text.partition(" - ")
+                track = self.library.has_track(artist.strip(), title.strip())
+            track = track or self.library.find(text)
+            self._resolved = (text, track)
+
         if track:
             current.update(artist=track["artist"], title=track["title"],
                            duration=float(track.get("duration") or 0.0))

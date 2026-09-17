@@ -28,7 +28,7 @@ from airadio.downloader import Downloader
 from airadio.library import Library
 from airadio.liquidsoap import annotate_uri, format_metadata, parse_metadata
 from airadio.publisher import SitePublisher
-from airadio.queueing import QueueManager
+from airadio.queueing import QueueManager, wav_duration
 from airadio.tts import TTS
 from airadio.util import dedupe_key, normalize, safe_filename
 from airadio.weather import Weather
@@ -1598,6 +1598,88 @@ class TestVoiceSelection(RadioTestCase):
 
     def test_disabled_tts_has_no_speaking_hosts(self):
         self.assertEqual(TTS(self.cfg).hosts, [])
+
+
+class TestStitchingAudio(RadioTestCase):
+    """The conversation splicer, which is the one bit of new audio handling.
+
+    _join_wavs is pure stdlib, so it runs everywhere. The ffmpeg path is the
+    one the laptop actually uses and is checked too when ffmpeg is around.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.tts = TTS(self.cfg)
+
+    def _parts(self, lengths=(0.4, 0.3), rate=22050):
+        made = []
+        for index, seconds in enumerate(lengths):
+            path = self.tmp / f"part{index}.wav"
+            with wave.open(str(path), "wb") as handle:
+                handle.setnchannels(1)
+                handle.setsampwidth(2)
+                handle.setframerate(rate)
+                handle.writeframes(
+                    struct.pack("<h", 3000 + index * 900) * int(rate * seconds))
+            made.append(path)
+        return made
+
+    def test_turns_are_spliced_end_to_end_with_a_gap(self):
+        parts = self._parts((0.4, 0.3))
+        target = self.tmp / "joined.wav"
+        self.assertTrue(self.tts._join_wavs(parts, target, gap=0.35))
+        # 0.4 + 0.35 of silence + 0.3, give or take a frame.
+        self.assertAlmostEqual(wav_duration(target), 1.05, places=2)
+
+    def test_splicing_keeps_the_format(self):
+        parts = self._parts((0.2, 0.2), rate=22050)
+        target = self.tmp / "joined.wav"
+        self.tts._join_wavs(parts, target, gap=0.1)
+        with wave.open(str(target), "rb") as handle:
+            self.assertEqual(handle.getframerate(), 22050)
+            self.assertEqual(handle.getnchannels(), 1)
+
+    def test_mismatched_voices_are_refused_rather_than_mangled(self):
+        # Two Piper models can differ in sample rate. Splicing them by hand
+        # would play the second voice at the wrong pitch.
+        first = self._parts((0.3,), rate=22050)[0]
+        second = self.tmp / "other.wav"
+        with wave.open(str(second), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(16000)
+            handle.writeframes(struct.pack("<h", 2000) * 4800)
+        self.assertFalse(
+            self.tts._join_wavs([first, second], self.tmp / "out.wav", gap=0.2))
+
+    def test_a_single_turn_still_produces_a_file(self):
+        parts = self._parts((0.5,))
+        target = self.tmp / "one.wav"
+        self.assertTrue(self.tts._join_wavs(parts, target, gap=0.0))
+        self.assertAlmostEqual(wav_duration(target), 0.5, places=2)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg not installed")
+    def test_ffmpeg_joins_and_normalises_in_one_pass(self):
+        parts = self._parts((0.4, 0.3))
+        target = self.tmp / "ff.wav"
+        self.assertTrue(self.tts._postprocess(parts, target, gap=0.35))
+        self.assertAlmostEqual(wav_duration(target), 1.05, places=1)
+        with wave.open(str(target), "rb") as handle:
+            # Everything reaching the stream is resampled to match the music.
+            self.assertEqual(handle.getframerate(), 44100)
+            self.assertEqual(handle.getnchannels(), 2)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg not installed")
+    def test_ffmpeg_handles_voices_that_disagree_on_sample_rate(self):
+        first = self._parts((0.3,), rate=22050)[0]
+        second = self.tmp / "other.wav"
+        with wave.open(str(second), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(16000)
+            handle.writeframes(struct.pack("<h", 2000) * 4800)
+        self.assertTrue(
+            self.tts._postprocess([first, second], self.tmp / "out.wav", gap=0.2))
 
 
 # -- the website feed -------------------------------------------------------
