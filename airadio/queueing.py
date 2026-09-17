@@ -49,25 +49,37 @@ class QueueManager:
         return float(row["total"]) if row else 0.0
 
     def reconcile_pushed(self, tier: str, still_queued: int) -> int:
-        """Mark pushed items liquidsoap has already played as done.
+        """Mark pushed items liquidsoap has actually finished playing as done.
 
         Liquidsoap owns playback, so the only way to know what it has finished
-        is to compare what we pushed against how deep its queue still is.
-        Everything older than that has been played.
+        is to compare what we pushed against how deep its queue still is: the
+        `still_queued` most recently pushed items are still ahead of the
+        speakers, everything pushed before that has actually been on air.
+
+        This is also where play_count and last_played_at get stamped, not at
+        push time. Liquidsoap can hold several items in its own buffer ahead
+        of whatever is actually audible (stream.liquidsoap_queue_depth), so
+        stamping "played" the moment a track was merely handed off made a
+        track look like it had already aired minutes before anyone heard it
+        -- while it was still sitting in the upcoming queue.
         """
         rows = self.db.query(
-            "SELECT id FROM queue_items WHERE status='pushed' AND tier=? "
-            "ORDER BY seq DESC LIMIT ?", (tier, max(0, still_queued)),
-        )
-        keep = [row["id"] for row in rows]
-        placeholders = ",".join("?" * len(keep))
-        sql = ("UPDATE queue_items SET status='done' "
-               "WHERE status='pushed' AND tier=?")
-        params: list = [tier]
-        if keep:
-            sql += f" AND id NOT IN ({placeholders})"
-            params.extend(keep)
-        return self.db.execute(sql, params)
+            "SELECT id, track_id FROM queue_items WHERE status='pushed' "
+            "AND tier=? ORDER BY seq", (tier,))
+        cutoff = max(0, len(rows) - max(0, still_queued))
+        finished = rows[:cutoff]
+        if not finished:
+            return 0
+
+        ids = [row["id"] for row in finished]
+        placeholders = ",".join("?" * len(ids))
+        changed = self.db.execute(
+            f"UPDATE queue_items SET status='done' WHERE id IN ({placeholders})",
+            ids)
+        for row in finished:
+            if row["track_id"]:
+                self.library.mark_played(row["track_id"])
+        return changed
 
     def ready_count(self) -> int:
         row = self.db.one(
@@ -231,9 +243,11 @@ class QueueManager:
                 "UPDATE queue_items SET status='pushed', pushed_at=? "
                 "WHERE id=? AND status='ready'", (time.time(), row["id"]),
             )
+            # play_count / last_played_at are stamped later, in
+            # reconcile_pushed, once liquidsoap's own queue depth confirms
+            # this has actually aired -- not here, when it has only just been
+            # handed off and may still be minutes from the speakers.
             if changed:
-                if row["track_id"]:
-                    self.library.mark_played(row["track_id"])
                 claimed.append(dict(row))
         return claimed
 

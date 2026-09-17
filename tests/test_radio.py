@@ -1404,13 +1404,18 @@ class TestQueue(RadioTestCase):
         self.assertEqual(len(second), 2)
         self.assertFalse({i["id"] for i in first} & {i["id"] for i in second})
 
-    def test_take_next_marks_tracks_played(self):
+    def test_take_next_does_not_mark_tracks_played(self):
+        # Handing a track to liquidsoap is not the same as it having aired --
+        # liquidsoap can hold several items in its own buffer ahead of
+        # whatever is actually audible. Stamping "played" here (the old
+        # behaviour) made a track look already played while it was still
+        # sitting in the upcoming queue.
         self.build()
         item = self.queue.take_next("ai", limit=1)[0]
         row = self.db.one("SELECT play_count, last_played_at FROM tracks WHERE id=?",
                           (item["track_id"],))
-        self.assertEqual(row["play_count"], 1)
-        self.assertIsNotNone(row["last_played_at"])
+        self.assertEqual(row["play_count"], 0)
+        self.assertIsNone(row["last_played_at"])
 
     def test_take_next_drops_vanished_files(self):
         self.build()
@@ -1466,6 +1471,24 @@ class TestQueue(RadioTestCase):
             self.queue.ready_seconds(),
             remaining["n"] * 600,
             "buffer is counting audio that has already been played")
+
+    def test_reconcile_marks_only_the_tracks_that_actually_finished(self):
+        self.build()
+        items = self.queue.take_next("ai", limit=3)
+        # Liquidsoap reports 1 still queued: the other 2 have actually aired.
+        self.queue.reconcile_pushed("ai", 1)
+
+        for item in items[:2]:
+            row = self.db.one(
+                "SELECT play_count, last_played_at FROM tracks WHERE id=?",
+                (item["track_id"],))
+            self.assertEqual(row["play_count"], 1)
+            self.assertIsNotNone(row["last_played_at"])
+
+        row = self.db.one("SELECT play_count, last_played_at FROM tracks WHERE id=?",
+                          (items[2]["track_id"],))
+        self.assertEqual(row["play_count"], 0)
+        self.assertIsNone(row["last_played_at"])
 
     def test_reconcile_keeps_the_newest_items(self):
         self.build()
