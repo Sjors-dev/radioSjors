@@ -46,7 +46,7 @@ and restart the brain: `sudo systemctl restart ai-radio-brain`.
 | `GIST_ID`          | From `site-init`. Required.                                     |
 | `SITE_PASSWORD`    | The password for the whole site. Required.                      |
 | `STREAM_URL`       | The direct listen link from caster.fm. Gives the nicer player.  |
-| `PLAYER_EMBED_URL` | caster.fm's own embed, used only when there is no `STREAM_URL`. |
+| `PLAYER_EMBED_URL` | Free fallback when `STREAM_URL` isn't set (or is paywalled on your caster.fm plan). Paste their **entire embed snippet**, unedited -- the site parses out whatever it needs, whether that's their `<div data-publicToken>` widget or an older plain `<iframe src>` link. |
 | `GITHUB_TOKEN`     | Optional. A secret gist reads fine without one.                 |
 | `GIST_FILENAME`    | Optional, defaults to `radio.json`.                             |
 

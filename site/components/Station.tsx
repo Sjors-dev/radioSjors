@@ -4,13 +4,14 @@ import { useEffect, useMemo, useState } from "react";
 
 import Player from "@/components/Player";
 import Stamp from "@/components/Stamp";
+import type { EmbedConfig } from "@/lib/embed";
 import { ago, clock, elapsed, StationState } from "@/lib/station";
 
 type Props = {
   initial: StationState | null;
   initialError: string;
   streamUrl: string;
-  embedUrl: string;
+  embed: EmbedConfig;
 };
 
 // The radio pushes every twenty seconds, so asking more often than this only
@@ -24,7 +25,7 @@ export default function Station({
   initial,
   initialError,
   streamUrl,
-  embedUrl,
+  embed,
 }: Props) {
   const [state, setState] = useState<StationState | null>(initial);
   const [error, setError] = useState(initialError);
@@ -168,7 +169,7 @@ export default function Station({
               </section>
 
               <div style={{ display: "grid", gap: 18 }}>
-                <Player streamUrl={streamUrl} embedUrl={embedUrl} />
+                <Player streamUrl={streamUrl} embed={embed} />
 
                 {state.weather ? (
                   <section className="block">

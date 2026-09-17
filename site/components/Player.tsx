@@ -1,15 +1,18 @@
 "use client";
 
+import Script from "next/script";
 import { useEffect, useRef, useState } from "react";
+
+import type { EmbedConfig } from "@/lib/embed";
 
 type Props = {
   streamUrl: string;
-  embedUrl: string;
+  embed: EmbedConfig;
 };
 
 type Status = "idle" | "connecting" | "playing" | "error";
 
-export default function Player({ streamUrl, embedUrl }: Props) {
+export default function Player({ streamUrl, embed }: Props) {
   const audio = useRef<HTMLAudioElement | null>(null);
   const [status, setStatus] = useState<Status>("idle");
   const [volume, setVolume] = useState(0.8);
@@ -21,7 +24,47 @@ export default function Player({ streamUrl, embedUrl }: Props) {
   // caster.fm gives an embeddable player of its own. It works, but it drags
   // its own styling in with it, so it is only used when there is no direct
   // stream URL to build a nicer button around.
-  if (!streamUrl && embedUrl) {
+  if (!streamUrl && embed?.kind === "widget") {
+    return (
+      <div className="block block--hot">
+        <h2 className="block__label">
+          <span>Listen</span>
+        </h2>
+        <div className="embed">
+          {/* caster.fm's loader script scans the page for this div by class
+             and renders the actual player into it. React must never touch
+             its children after that, so nothing here is React-managed. */}
+          <div
+            className="cstrEmbed"
+            data-type="newStreamPlayer"
+            // React only passes a data-* attribute through as-is when it is
+            // spelled all-lowercase; caster.fm's snippet writes these in
+            // camelCase, but a browser parsing that snippet as raw HTML
+            // would lowercase it anyway (that is what HTML5 parsing does to
+            // attribute names), and their own script reads it that way --
+            // confirmed working. Writing it lowercase here just matches
+            // reality and drops React's warning about it.
+            data-publictoken={embed.publicToken}
+            data-theme={embed.theme}
+            data-color={embed.color}
+            data-channelid=""
+            data-rendered="false"
+          >
+            {/* caster.fm's widget script refuses to render without these --
+               it is their "powered by" attribution requirement, not
+               decoration, so it stays exactly as their dashboard gives it. */}
+            <a href="https://www.caster.fm">Shoutcast Hosting</a>{" "}
+            <a href="https://www.caster.fm">Stream Hosting</a>{" "}
+            <a href="https://www.caster.fm">Radio Server Hosting</a>
+          </div>
+        </div>
+        <Script src="https://cdn.cloud.caster.fm//widgets/embed.js"
+               strategy="afterInteractive" />
+      </div>
+    );
+  }
+
+  if (!streamUrl && embed?.kind === "iframe") {
     return (
       <div className="block block--hot">
         <h2 className="block__label">
@@ -29,7 +72,7 @@ export default function Player({ streamUrl, embedUrl }: Props) {
         </h2>
         <iframe
           className="embed"
-          src={embedUrl}
+          src={embed.url}
           title="Radio player"
           allow="autoplay"
         />
@@ -45,8 +88,8 @@ export default function Player({ streamUrl, embedUrl }: Props) {
         </h2>
         <p className="note note--quiet">
           No stream URL configured. Set <code>STREAM_URL</code> to the listen
-          link from caster.fm, or <code>PLAYER_EMBED_URL</code> to their embed,
-          and redeploy.
+          link from caster.fm, or paste their embed code (the whole snippet)
+          into <code>PLAYER_EMBED_URL</code>, and redeploy.
         </p>
       </div>
     );

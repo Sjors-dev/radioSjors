@@ -425,9 +425,17 @@ a {
 
 .embed {
   width: 100%;
+  min-height: 140px;
+  background: var(--ink);
+}
+
+/* An iframe needs an explicit height (it does not size to its content across
+   origins). The widget div, in contrast, is sized by whatever caster.fm's
+   loader script renders into it -- min-height above just stops a jump while
+   that script is still loading. */
+iframe.embed {
   border: 0;
   height: 140px;
-  background: var(--ink);
 }
 
 /* -- lists ---------------------------------------------------------------- */

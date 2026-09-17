@@ -1,4 +1,5 @@
 import Station from "@/components/Station";
+import { parseEmbed } from "@/lib/embed";
 import { readStation } from "@/lib/station";
 
 // The whole page is "what is happening right now", so there is nothing here
@@ -14,7 +15,7 @@ export default async function Page() {
       initial={result.ok ? result.state : null}
       initialError={result.ok ? "" : result.error}
       streamUrl={process.env.STREAM_URL ?? ""}
-      embedUrl={process.env.PLAYER_EMBED_URL ?? ""}
+      embed={parseEmbed(process.env.PLAYER_EMBED_URL ?? "")}
     />
   );
 }
