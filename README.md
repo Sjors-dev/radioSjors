@@ -17,13 +17,13 @@ Single listener. Not a public broadcast.
                   ┌─────────────┐     Last.fm API (free)
                   │   BRAIN     │────▶ discover real similar tracks
   Discord bot ───▶│  (Python)   │     yt-dlp ─▶ download + tag what's missing
-                  │   planner   │
-                  │             │────▶ writes all the DJ patter for the hour
-                  └──────┬──────┘
-                         │ block: [patter, song, patter, song, …]
+                  │   planner   │◀──── Open-Meteo: what it's doing outside
+                  │             │────▶ writes everything the hosts say
+                  └──────┬──────┘────▶ gist ─▶ Vercel site ─▶ your phone
+                         │ block: [talk, song, talk, song, …]
                          ▼
                   ┌─────────────┐
-                  │ Piper TTS   │  patter text ─▶ .wav on disk
+                  │ Piper TTS   │  one voice per host, conversations stitched
                   └──────┬──────┘
                          ▼
                   ┌─────────────┐
@@ -68,7 +68,9 @@ Kill the brain and the music keeps playing. That is the point, and
 | `airadio/library.py` | Scan the music folder, read/write tags, de-duplicate by tags *and* by content hash, ban/unban |
 | `airadio/discovery.py` | Last.fm client: real similar artists and tracks, plus reference durations |
 | `airadio/downloader.py` | yt-dlp wrapper and the quality filters that make it usable |
-| `airadio/tts.py` | Piper (or espeak) renderer, loudness-matched to the music |
+| `airadio/tts.py` | Piper (or espeak) renderer, a voice per host, stitches a two-host exchange into one file |
+| `airadio/weather.py` | Open-Meteo. Free, keyless, and never fatal — no reading means the hosts skip it |
+| `airadio/publisher.py` | Pushes now-playing and the queue to a secret gist, which the website reads |
 | `airadio/brain/llm.py` | Gemini ⇄ Groq with failover and rate-limit cooldown |
 | `airadio/brain/planner.py` | The hourly block: one LLM pass picks the order and writes every patter line. Deterministic fallback when the LLM is down |
 | `airadio/brain/intent.py` | Chat message → specific request / vibe shift / question |
@@ -77,6 +79,30 @@ Kill the brain and the music keeps playing. That is the point, and
 | `airadio/runner.py` | The brain loop. Single threaded on purpose — that *is* the concurrency cap |
 | `airadio/bot/discord_bot.py` | Discord front end. Writes to SQLite, never does slow work itself |
 | `stream/radio.liq.template` | The liquidsoap script. `airadio stream-config` fills in the secrets |
+| `site/` | The website. Next.js on Vercel, password-gated, reads the gist |
+
+---
+
+## The two hosts
+
+The station has two of them. Ray leads; Nina turns up for the occasional
+conversation. Each has their own Piper voice, and a conversation is rendered
+as **one** audio file rather than one per line — the stream feeder pushes a
+queue item atomically, so a song landing in the middle of an exchange would be
+worse than no exchange at all.
+
+A host whose voice model is not on disk is left out of the show entirely,
+rather than having their lines read in the other one's voice.
+
+How much they talk is rolled fresh every hour inside the ranges in
+`dj.segments`, which is the point — an hour that always has exactly one
+weather slot and two chats is just a longer format, not a looser one. In a
+given hour they might do nothing but short links, or two conversations, a
+weather moment and something true about a record.
+
+Weather comes from Open-Meteo: free, no key, no account. An hour with no
+weather slot is not shown the briefing at all, because a model will use
+anything you give it.
 
 ---
 
@@ -90,6 +116,11 @@ Kill the brain and the music keeps playing. That is the point, and
 .venv/bin/python main.py scan             # re-index the music folder
 .venv/bin/python main.py download "Artist" "Title"
 .venv/bin/python main.py tts-test "line to speak"
+.venv/bin/python main.py tts-test --host Nina "let me try"
+.venv/bin/python main.py tts-test --duet "Ray says this|and Nina answers"
+.venv/bin/python main.py weather          # what the hosts are told about outside
+.venv/bin/python main.py site-init        # create the gist the website reads
+.venv/bin/python main.py site-preview     # exactly what the website would be told
 .venv/bin/python main.py mood "darker and slower"
 .venv/bin/python main.py banned           # what's blacklisted
 .venv/bin/python main.py unban "Artist" "Title"
@@ -114,7 +145,7 @@ it when the LLM is down:
 | Command | Does |
 |---------|------|
 | `!np` | what is on air right now |
-| `!queue` | the next few tracks |
+| `!queue` | the next few items, talk included |
 | `!status` | library size, buffer, mood, stream health |
 | `!skip` | skip the current track |
 | `!mood` | show the current mood |
@@ -135,9 +166,10 @@ because the safety playlist reads that folder directly. Reversible with
 
 ## Running costs
 
-Nothing. Last.fm, Gemini, Groq, Discord and yt-dlp are all free tiers with no
-card, and the hourly-batched design makes only a handful of LLM calls per hour.
-TTS is local. The only bill is caster.fm, if you choose a paid tier there.
+Nothing. Last.fm, Gemini, Groq, Discord, Open-Meteo, GitHub Gists, Vercel and
+yt-dlp are all free tiers with no card, and the hourly-batched design makes
+only a handful of LLM calls per hour. TTS is local. The only bill is
+caster.fm, if you choose a paid tier there.
 
 ## Tests
 
@@ -145,6 +177,8 @@ TTS is local. The only bill is caster.fm, if you choose a paid tier there.
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-79 offline tests — no network, no ffmpeg, no liquidsoap needed. They cover the
-quality filters, de-duplication, banning, the fallback planner, artist spacing,
-queue claiming, LLM failover, and the liquidsoap telnet protocol.
+169 offline tests — no network, no ffmpeg, no liquidsoap needed. They cover
+the quality filters, de-duplication, banning, the fallback planner, artist
+spacing, queue claiming, LLM failover, the liquidsoap telnet protocol, the
+weather briefing, two-host conversation validation and rendering, the schema
+migration, and what the website gets told.

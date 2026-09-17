@@ -11,8 +11,13 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VOICE_DIR="${PROJECT_DIR}/voices"
+# The station has two hosts and they need to sound different, so two voices
+# are fetched. Both land in the same directory, which is how the co-host is
+# found without anyone writing out a second absolute path.
 VOICE_NAME="en_US-amy-medium"
 VOICE_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium"
+COHOST_NAME="en_GB-jenny_dioco-medium"
+COHOST_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/jenny_dioco/medium"
 
 say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*"; }
@@ -52,16 +57,26 @@ else
   sudo apt-get install -y espeak-ng
 fi
 
-say "Downloading the ${VOICE_NAME} voice"
+say "Downloading the voices"
 mkdir -p "${VOICE_DIR}"
-for suffix in ".onnx" ".onnx.json"; do
-  target="${VOICE_DIR}/${VOICE_NAME}${suffix}"
-  if [ -s "${target}" ]; then
-    echo "  already have $(basename "${target}")"
-  else
-    curl -fL --retry 3 -o "${target}" "${VOICE_BASE}/${VOICE_NAME}${suffix}"
-  fi
-done
+fetch_voice() {
+  local name="$1" base="$2" suffix target
+  for suffix in ".onnx" ".onnx.json"; do
+    target="${VOICE_DIR}/${name}${suffix}"
+    if [ -s "${target}" ]; then
+      echo "  already have $(basename "${target}")"
+    else
+      curl -fL --retry 3 -o "${target}" "${base}/${name}${suffix}"
+    fi
+  done
+}
+fetch_voice "${VOICE_NAME}" "${VOICE_BASE}"
+# The co-host. If this one fails the station still works -- it just runs with
+# a single voice and never writes a conversation.
+if ! fetch_voice "${COHOST_NAME}" "${COHOST_BASE}"; then
+  warn "could not download the co-host voice (${COHOST_NAME});"
+  warn "the station will run with one host until it is there"
+fi
 
 say "Writing local configuration overrides"
 LOCAL_CONFIG="${PROJECT_DIR}/config/config.local.yaml"

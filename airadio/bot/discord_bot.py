@@ -170,14 +170,21 @@ class RadioBot(discord.Client):
 
     def _queue_preview(self) -> str:
         queue = QueueManager(self.cfg, self.db)  # read-only view
-        items = queue.preview(10)
-        songs = [item for item in items if item["kind"] == "song"]
-        if not songs:
+        # Include items still being voiced: they are genuinely next, and a
+        # queue that hides the talk looks half empty.
+        items = queue.preview(14, include_pending=True)
+        if not any(item["kind"] == "song" for item in items):
             return "Queue is empty - the safety playlist is covering."
+
         lines = []
-        for item in songs[:6]:
-            marker = "*" if item["tier"] == "request" else " "
-            lines.append(f"{marker} {item['artist']} - {item['title']}")
+        for item in items[:8]:
+            if item["kind"] == "song":
+                marker = "*" if item["tier"] == "request" else " "
+                lines.append(f"{marker} {item['artist']} - {item['title']}")
+            elif item["kind"] == "banter":
+                lines.append(f"  [{item['host'] or 'the hosts'}, talking]")
+            else:
+                lines.append(f"  [{item['host'] or 'station'} link]")
         return "Coming up:\n```\n" + "\n".join(lines) + "\n```"
 
     def _banned_list(self) -> str:

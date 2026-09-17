@@ -204,6 +204,77 @@ and confirm liquidsoap reconnects to caster.fm on its own.
 
 ---
 
+## 9. The second host
+
+Upgrading an existing install needs one extra voice model. The installer
+fetches it for new installs; on a laptop that is already running:
+
+```bash
+cd ~/radioSjors
+V=voices          # or wherever your first voice lives
+B=https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/jenny_dioco/medium
+curl -fL -o $V/en_GB-jenny_dioco-medium.onnx      $B/en_GB-jenny_dioco-medium.onnx
+curl -fL -o $V/en_GB-jenny_dioco-medium.onnx.json $B/en_GB-jenny_dioco-medium.onnx.json
+```
+
+It has to sit **next to** the voice already named in `tts.voice_model`, which
+is how the co-host is found without spelling out a second path. Then check it:
+
+```bash
+.venv/bin/python main.py doctor            # look for "two-host segments"
+.venv/bin/python main.py tts-test --duet "Ray goes first|and Nina answers"
+```
+
+If the file is missing, nothing breaks — the station simply runs with one host
+and never writes a conversation. Rename the hosts, change their characters or
+drop the second one entirely under `dj.hosts` in `config/config.local.yaml`.
+
+---
+
+## 10. The website (optional)
+
+A Next.js site under `site/`, deployed on Vercel, showing now playing, the
+queue, what just went out and a listen button. It is password-gated, because
+the station is private on purpose.
+
+The laptop cannot be reached from the internet, so it pushes instead: a small
+JSON document into a secret GitHub Gist every twenty seconds.
+
+**On the laptop**, make a GitHub token at
+<https://github.com/settings/tokens> → *Generate new token (classic)*, ticking
+**only** the `gist` scope. Put it in `.env` as `GITHUB_TOKEN`, then:
+
+```bash
+.venv/bin/python main.py site-init
+```
+
+It creates the gist and prints the id. Put that in `.env` as `SITE_GIST_ID`,
+turn publishing on in `config/config.local.yaml`:
+
+```yaml
+site:
+  enabled: true
+```
+
+and restart: `sudo systemctl restart ai-radio-brain`. Check it with
+`.venv/bin/python main.py site-preview`, which prints exactly what the site
+will be told.
+
+**On Vercel**, import this repo and set **Root Directory** to `site`. Then add
+these environment variables and redeploy:
+
+| Name | Value |
+|------|-------|
+| `GIST_ID` | what `site-init` printed |
+| `SITE_PASSWORD` | whatever you want to type to get in |
+| `STREAM_URL` | the direct listen link from caster.fm |
+
+If `SITE_PASSWORD` is unset, nobody gets in at all — including you. That is on
+purpose: a private station should not fall open because a variable was
+forgotten.
+
+---
+
 ## Tuning it afterwards
 
 Everything lives in `config/config.yaml`, with machine-specific overrides in
@@ -214,8 +285,12 @@ Worth knowing about:
 
 | Setting | Does what |
 |---------|-----------|
-| `dj.persona` | The DJ's whole personality. Rewrite it freely — it goes into every prompt verbatim. |
+| `dj.persona` | The station's whole personality. Rewrite it freely — it goes into every prompt verbatim. |
+| `dj.hosts` | The two hosts: name, character, and which voice model each uses. Delete the second entry to go back to one voice; everything else adapts. |
 | `dj.patter_every_n_tracks` | `1` for a chatty station, `3`–`4` for mostly music. |
+| `dj.segments` | How much extra talk an hour gets. Each value is a `[low, high]` range rolled fresh every hour. `[0, 0]` switches something off; `[2, 2]` pins it. |
+| `dj.max_segment_words` | The ceiling on a long item — a weather moment, a music note, a whole conversation. Raise it if you want them chattier. |
+| `weather.*` | Where the weather comes from. Change `place_name`, `latitude` and `longitude` if you move. `enabled: false` and they never mention it. |
 | `planner.mood_map` | Time-of-day → mood and energy band. Hour ranges must cover 0–23. |
 | `planner.buffer_minutes` | How far ahead to work. Lower = the station reacts faster; higher = more slack when things fail. |
 | `llm.gemini_model` / `llm.groq_model` | Which model each provider uses. Both retire models regularly — the provider's own `/models` endpoint is the source of truth. |
