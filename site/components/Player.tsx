@@ -101,8 +101,15 @@ export default function Player({ streamUrl, embed }: Props) {
 
     if (status === "playing" || status === "connecting") {
       element.pause();
-      // A paused live stream keeps buffering, and then plays minutes-old
-      // audio when you come back. Dropping the source stops the world.
+      // This is what makes play, after a pause, return to the LIVE edge of
+      // the stream rather than resuming wherever it happened to be. A
+      // paused <audio> element keeps its buffered connection open and would
+      // otherwise resume from a position that is now minutes stale, or the
+      // browser plays through everything it had already buffered before
+      // catching up to live. Dropping the source and reloading closes that
+      // connection outright, so the next play() below opens a brand new one
+      // -- which, for a radio stream, always starts at whatever is live
+      // right now.
       element.removeAttribute("src");
       element.load();
       setStatus("idle");
@@ -115,6 +122,10 @@ export default function Player({ streamUrl, embed }: Props) {
       await element.play();
       setStatus("playing");
     } catch {
+      // Clean up the failed attempt so a retry gets a fresh connection
+      // rather than whatever half-open state play() left behind.
+      element.removeAttribute("src");
+      element.load();
       setStatus("error");
     }
   }
@@ -169,16 +180,29 @@ export default function Player({ streamUrl, embed }: Props) {
           </div>
         </div>
 
-        <input
-          className="volume"
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={volume}
-          onChange={(event) => setVolume(Number(event.target.value))}
-          aria-label="Volume"
-        />
+        <div className="fader">
+          <span className="fader__label">Vol</span>
+          <div className="fader__track">
+            <div className="fader__ticks" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+              <i />
+              <i />
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={volume}
+              onChange={(event) => setVolume(Number(event.target.value))}
+              aria-label="Volume"
+              aria-orientation="vertical"
+            />
+          </div>
+          <span className="fader__value">{Math.round(volume * 100)}</span>
+        </div>
       </div>
 
       <audio ref={audio} preload="none" />

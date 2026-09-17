@@ -304,14 +304,17 @@ a {
 
 .player {
   display: flex;
-  flex-direction: column;
-  gap: 14px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px 14px;
 }
 
 .player__row {
   display: flex;
   align-items: center;
   gap: 14px;
+  min-width: 0;
 }
 
 .playbtn {
@@ -354,30 +357,116 @@ a {
   line-height: 1.6;
 }
 
-.volume {
+/* A mixing-console channel fader: vertical track, wide flat cap. Built from
+   a plain horizontal range input rotated -90deg, which keeps native
+   keyboard control (arrow keys, page up/down) and screen reader behaviour --
+   a hand-built vertical slider from scratch would have to reimplement all
+   of that. */
+.fader {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+}
+
+.fader__label {
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  opacity: 0.8;
+}
+
+.fader__track {
+  position: relative;
+  width: 38px;
+  height: 108px;
+}
+
+/* Decoration only -- a scale behind the channel, like the printed marks
+   beside a real fader's throw. */
+.fader__ticks {
+  position: absolute;
+  inset: 6px 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  pointer-events: none;
+}
+
+.fader__ticks i {
+  display: block;
+  width: 9px;
+  height: 1px;
+  margin: 0 auto;
+  background: currentColor;
+  opacity: 0.4;
+}
+
+.fader input[type="range"] {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 108px;
+  height: 38px;
+  margin: 0;
+  padding: 0;
+  background: transparent;
   -webkit-appearance: none;
   appearance: none;
+  transform: translate(-50%, -50%) rotate(-90deg);
+  cursor: grab;
+}
+
+.fader input[type="range"]:active {
+  cursor: grabbing;
+}
+
+.fader input[type="range"]::-webkit-slider-runnable-track {
   width: 100%;
   height: 8px;
   background: var(--ink);
   border: 2px solid var(--ink);
-  cursor: pointer;
 }
 
-.volume::-webkit-slider-thumb {
+.fader input[type="range"]::-moz-range-track {
+  width: 100%;
+  height: 8px;
+  background: var(--ink);
+  border: 2px solid var(--ink);
+}
+
+/* The cap. Pre-rotation width/height are swapped from how they will finally
+   read -- this ends up short and wide, sticking out past the thin channel
+   on both sides, the way a real fader cap does. */
+.fader input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   width: 16px;
-  height: 20px;
-  background: var(--acid);
+  height: 44px;
+  margin-top: -18px;
+  border-radius: 2px;
+  background: var(--acid)
+    repeating-linear-gradient(to bottom, transparent 0 6px, var(--ink) 6px 7px);
   border: 2px solid var(--ink);
+  cursor: grab;
 }
 
-.volume::-moz-range-thumb {
-  width: 14px;
-  height: 18px;
-  border-radius: 0;
-  background: var(--acid);
+.fader input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 44px;
+  border-radius: 2px;
+  background: var(--acid)
+    repeating-linear-gradient(to bottom, transparent 0 6px, var(--ink) 6px 7px);
   border: 2px solid var(--ink);
+  cursor: grab;
+}
+
+.fader__value {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+  min-width: 2.4em;
+  text-align: center;
 }
 
 .bars {
