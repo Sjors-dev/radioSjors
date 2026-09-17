@@ -543,6 +543,120 @@ class TestQualityFilters(RadioTestCase):
 # -- library ----------------------------------------------------------------
 
 
+class FakeLastFM(LastFM):
+    """A Last.fm whose similar-artist graph and top tracks are deterministic."""
+
+    def __init__(self, graph: dict[str, list[str]], tracks_per_artist: int = 20):
+        super().__init__("fake-key")
+        self.graph = graph
+        self.tracks_per_artist = tracks_per_artist
+        self.calls = 0
+
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    def similar_artists(self, artist, limit=12):
+        return self.graph.get(artist, [])[:limit]
+
+    def top_tracks(self, artist, limit=15):
+        self.calls += 1
+        return [{"artist": artist, "title": f"Track {n}"}
+                for n in range(min(limit, self.tracks_per_artist))]
+
+    def track_info(self, artist, title):
+        return {"duration": 200.0, "tags": [], "listeners": 1000,
+                "artist": artist, "title": title}
+
+    def artist_tags(self, artist):
+        return ["test"]
+
+
+GRAPH = {
+    "Kanye West": ["Jay-Z", "Kid Cudi", "Pusha T"],
+    "Radiohead": ["Blur", "Muse", "Portishead"],
+    "Billie Holiday": ["Ella Fitzgerald", "Nina Simone", "Sarah Vaughan"],
+    "Gunna": ["Young Thug", "Lil Baby", "Future"],
+}
+
+
+class TestDiscoveryBreadth(RadioTestCase):
+    """Discovery must widen the library, not deepen a handful of artists.
+
+    The first build took eight top tracks per artist and bailed after two
+    seeds, so a whole night of downloading produced 77 tracks across 14
+    artists while most of the configured seeds were never touched.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.lastfm = FakeLastFM(GRAPH)
+        self.downloader = Downloader(self.cfg, self.db, self.library, self.lastfm)
+
+    def counts(self, tracks):
+        out: dict[str, int] = {}
+        for track in tracks:
+            out[track["artist"]] = out.get(track["artist"], 0) + 1
+        return out
+
+    def test_no_artist_dominates_the_pool(self):
+        pool = self.lastfm.expand(list(GRAPH), want=30, per_artist=3)
+        counts = self.counts(pool)
+        self.assertLessEqual(max(counts.values()), 3, counts)
+
+    def test_pool_spans_many_artists(self):
+        pool = self.lastfm.expand(list(GRAPH), want=30, per_artist=3)
+        self.assertGreaterEqual(len(self.counts(pool)), 10)
+
+    def test_every_seed_is_reachable(self):
+        # Not every seed in one pass, but across several passes all of them
+        # should appear -- the old version explored one or two and stopped.
+        seen: set[str] = set()
+        for _ in range(8):
+            seen.update(t["artist"] for t in
+                        self.lastfm.expand(list(GRAPH), want=30, per_artist=3))
+        for seed in GRAPH:
+            self.assertIn(seed, seen, f"{seed} was never explored")
+
+    def test_download_order_alternates_artists(self):
+        # Round-robin matters: a FIFO candidate queue downloads in insertion
+        # order, so grouping by artist means hours of one discography.
+        pool = self.lastfm.expand(list(GRAPH), want=24, per_artist=3)
+        first_pass = [t["artist"] for t in pool[:8]]
+        self.assertEqual(len(set(first_pass)), len(first_pass),
+                         f"first downloads repeat an artist: {first_pass}")
+
+    def test_artist_cap_blocks_further_candidates(self):
+        self.cfg._data["discovery"]["max_tracks_per_artist"] = 2
+        for n in range(3):
+            self.db.execute(
+                "INSERT INTO tracks(path, dedupe_key, title, artist, added_at) "
+                "VALUES(?,?,?,?,?)",
+                (f"/x/kanye{n}.mp3", f"kanye west|track {n}", f"Track {n}",
+                 "Kanye West", 0))
+        self.downloader.seed_candidates(wanted=40)
+        rows = self.db.query(
+            "SELECT artist FROM candidates WHERE artist='Kanye West'")
+        self.assertEqual(rows, [], "queued more of an artist already at the cap")
+
+    def test_seeding_favours_under_represented_artists(self):
+        # Seeding from the most-played artists is a feedback loop; the ones
+        # that already dominate pull in more of themselves.
+        for n in range(9):
+            self.db.execute(
+                "INSERT INTO tracks(path, dedupe_key, title, artist, added_at) "
+                "VALUES(?,?,?,?,?)",
+                (f"/x/g{n}.mp3", f"gunna|track {n}", f"Track {n}", "Gunna", 0))
+        self.db.execute(
+            "INSERT INTO tracks(path, dedupe_key, title, artist, added_at) "
+            "VALUES(?,?,?,?,?)",
+            ("/x/r1.mp3", "radiohead|creep", "Creep", "Radiohead", 0))
+        rows = self.db.query(
+            "SELECT artist, COUNT(*) AS n FROM tracks WHERE missing=0 "
+            "GROUP BY artist ORDER BY n ASC LIMIT 10")
+        self.assertEqual(rows[0]["artist"], "Radiohead")
+
+
 class TestLibrary(RadioTestCase):
     def test_scan_indexes_files(self):
         self.seed_library(artists=3, per_artist=4)

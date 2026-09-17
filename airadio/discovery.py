@@ -136,36 +136,66 @@ class LastFM:
 
     # -- higher level -------------------------------------------------------
 
-    def expand(self, seeds: list[str], want: int = 25) -> list[dict]:
+    def expand(self, seeds: list[str], want: int = 25,
+               per_artist: int = 3) -> list[dict]:
         """Grow a pool of candidate tracks from a handful of seed artists.
 
-        Mixes the seeds' own top tracks with the top tracks of similar artists,
-        so the library drifts outward instead of looping the same five names.
+        Breadth first, deliberately. Taking eight top tracks from one artist
+        fills the library with that artist; taking two or three from many
+        artists is what actually grows a station. The result is round-robined
+        so the download queue alternates artists rather than working through
+        one discography at a time.
         """
         if not self.enabled or not seeds:
             return []
 
-        pool: list[dict] = []
-        seen: set[tuple[str, str]] = set()
+        # Widen to every similar artist we can reach before fetching a single
+        # track, so the artist list is broad before the track list is deep.
+        artists: list[str] = []
+        seen_artists: set[str] = set()
         shuffled = list(seeds)
         random.shuffle(shuffled)
 
         for seed in shuffled:
-            if len(pool) >= want:
+            for artist in [seed] + self.similar_artists(seed, limit=10):
+                key = artist.lower().strip()
+                if key and key not in seen_artists:
+                    seen_artists.add(key)
+                    artists.append(artist)
+            # Enough artists to fill the request several times over at the
+            # per-artist cap, without hammering Last.fm for all of them.
+            if len(artists) >= max(12, want):
                 break
-            branches = [seed] + self.similar_artists(seed, limit=8)
-            random.shuffle(branches)
-            for artist in branches[:4]:
-                for track in self.top_tracks(artist, limit=8):
-                    key = (track["artist"].lower(), track["title"].lower())
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    pool.append(track)
-                if len(pool) >= want * 2:
-                    break
 
-        random.shuffle(pool)
-        log.info("Last.fm expansion from %d seeds produced %d candidates",
-                 len(seeds), len(pool))
+        random.shuffle(artists)
+
+        buckets: list[list[dict]] = []
+        seen_tracks: set[tuple[str, str]] = set()
+        collected = 0
+        for artist in artists:
+            bucket = []
+            for track in self.top_tracks(artist, limit=per_artist * 2):
+                key = (track["artist"].lower(), track["title"].lower())
+                if key in seen_tracks:
+                    continue
+                seen_tracks.add(key)
+                bucket.append(track)
+                if len(bucket) >= per_artist:
+                    break
+            if bucket:
+                buckets.append(bucket)
+                collected += len(bucket)
+            if collected >= want * 2:
+                break
+
+        # Round-robin: one track from each artist, then a second, and so on.
+        pool: list[dict] = []
+        for index in range(per_artist):
+            for bucket in buckets:
+                if index < len(bucket):
+                    pool.append(bucket[index])
+
+        log.info("Last.fm expansion: %d seeds -> %d artists -> %d candidates "
+                 "(max %d per artist)",
+                 len(seeds), len(buckets), len(pool[:want]), per_artist)
         return pool[:want]
