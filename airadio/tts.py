@@ -298,31 +298,37 @@ class TTS:
                               and produced.stat().st_size > 1000)
 
             if not edge_ok:
+                reasons = []
+                if not edge_exe:
+                    reasons.append("edge-tts not found on PATH")
+                if not ffmpeg_exe:
+                    reasons.append("ffmpeg not found (needed to convert edge-tts's mp3)")
+                if not primary.edge_voice:
+                    reasons.append("tts.edge_voice is not set")
+                if not reasons:
+                    reasons.append("edge-tts request failed -- run 'edge-tts "
+                                   f"--voice {primary.edge_voice} --text hi "
+                                   "--write-media test.mp3' by hand to see the "
+                                   "raw error (offline, or the unofficial "
+                                   "endpoint is blocked, are the usual causes)")
+                reason_text = "; ".join(reasons)
+
                 fallback = self._synthesize_piper(
                     "Radio check, one two.", Path(tmp) / "probe-fallback.wav",
                     primary, self.fallback_engine)
                 fallback_ok = bool(fallback and fallback.exists()
                                    and fallback.stat().st_size > 1000)
                 if not fallback_ok:
-                    reasons = []
-                    if not edge_exe:
-                        reasons.append("edge-tts not found on PATH")
-                    if not ffmpeg_exe:
-                        reasons.append("ffmpeg not found (needed to convert edge-tts's mp3)")
-                    if not primary.edge_voice:
-                        reasons.append("tts.edge_voice is not set")
-                    if not reasons:
-                        reasons.append("edge-tts request failed (offline, or the "
-                                       "unofficial endpoint is blocked)")
-                    return False, ("edge-tts unavailable (" + "; ".join(reasons) +
-                                   ") and the piper fallback (" +
-                                   f"{self.fallback_engine}) also failed")
+                    return False, (f"edge-tts unavailable ({reason_text}) and "
+                                   f"the piper fallback ({self.fallback_engine}) "
+                                   "also failed")
                 self._ok = True
                 self._failures = 0
                 self._muted_until = 0.0
-                return True, (f"edge-tts is not working right now (see log), but "
-                              f"the {self.fallback_engine} fallback is -- patter "
-                              "will render with piper until edge-tts comes back")
+                return True, (f"edge-tts is not working right now ({reason_text}), "
+                              f"but the {self.fallback_engine} fallback is -- "
+                              "patter will render with piper until edge-tts "
+                              "comes back")
 
         self._ok = True
         self._failures = 0
@@ -514,11 +520,14 @@ class TTS:
             return None
         exe = shutil.which("edge-tts")
         if not exe:
+            log.debug("edge-tts not found on PATH, using the piper fallback")
             return None
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             # edge-tts only speaks mp3; with no way to get a wav out of that,
             # do not even try.
+            log.debug("ffmpeg not found, cannot convert edge-tts's mp3 -- "
+                      "using the piper fallback")
             return None
 
         with tempfile.TemporaryDirectory(prefix="airadio-edge-") as tmp:
