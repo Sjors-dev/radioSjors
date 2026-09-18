@@ -27,6 +27,7 @@ import json
 import logging
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import wave
@@ -231,15 +232,28 @@ class TTS:
             exe = shutil.which("piper")
             return [exe] if exe else None
         if engine == "piper_python":
-            import sys
             return [sys.executable, "-m", "piper"]
         if engine == "espeak":
             exe = shutil.which("espeak-ng") or shutil.which("espeak")
             return [exe] if exe else None
         if engine == "edge_tts":
-            exe = shutil.which("edge-tts")
+            exe = self._find_edge_tts()
             return [exe] if exe else None
         return None
+
+    @staticmethod
+    def _find_edge_tts() -> str | None:
+        """pip installs edge-tts's console script next to whatever python
+        installed it. shutil.which alone misses it whenever that venv's bin/
+        is not on PATH -- true for a bare `.venv/bin/python ...` invocation,
+        and for a systemd unit that runs the interpreter directly, which are
+        exactly the two ways this project is normally run."""
+        exe = shutil.which("edge-tts")
+        if exe:
+            return exe
+        name = "edge-tts.exe" if sys.platform == "win32" else "edge-tts"
+        candidate = Path(sys.executable).parent / name
+        return str(candidate) if candidate.exists() else None
 
     def check(self) -> tuple[bool, str]:
         """Probe the configured engine. Returns (ok, human readable detail)."""
@@ -286,7 +300,7 @@ class TTS:
         fallback actually works so a blocked/offline endpoint is a warning,
         not a silent outage."""
         primary = self.voice_for(None)
-        edge_exe = shutil.which("edge-tts")
+        edge_exe = self._find_edge_tts()
         ffmpeg_exe = shutil.which("ffmpeg")
 
         with tempfile.TemporaryDirectory(prefix="airadio-tts-") as tmp:
@@ -300,7 +314,8 @@ class TTS:
             if not edge_ok:
                 reasons = []
                 if not edge_exe:
-                    reasons.append("edge-tts not found on PATH")
+                    reasons.append("edge-tts not installed (checked PATH and "
+                                   f"next to {sys.executable})")
                 if not ffmpeg_exe:
                     reasons.append("ffmpeg not found (needed to convert edge-tts's mp3)")
                 if not primary.edge_voice:
@@ -518,9 +533,10 @@ class TTS:
         """
         if not voice.edge_voice:
             return None
-        exe = shutil.which("edge-tts")
+        exe = self._find_edge_tts()
         if not exe:
-            log.debug("edge-tts not found on PATH, using the piper fallback")
+            log.debug("edge-tts not found on PATH or next to %s, using the "
+                      "piper fallback", sys.executable)
             return None
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
