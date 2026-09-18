@@ -1,8 +1,13 @@
 """Local text-to-speech for the DJ patter.
 
-Piper is the intended engine: no per-use cost, small enough for a Celeron.
+Piper is the default engine: no per-use cost, small enough for a Celeron.
 Rendering is slow on that CPU, which is exactly why the planner works an hour
-ahead -- the buffer hides the latency completely.
+ahead -- the buffer hides the latency completely. tts.engine: edge_tts trades
+that guarantee for noticeably more expressive voices (Microsoft's free Edge
+neural voices, no key, no bill), reached over the network through an
+unofficial endpoint -- so every host configured for it also needs a piper
+voice_model, which _synthesize_edge()'s caller falls back to per line
+whenever edge-tts is offline, rate-limited, or blocked.
 
 The station has two hosts, so this module keeps a voice per host and can render
 a back-and-forth exchange into a single audio file.  One file, not one per
@@ -60,17 +65,25 @@ class Voice:
     duration (higher = less metronomic, more natural-sounding rhythm). Both
     default to exactly Piper's own stock values, so a host that does not set
     them sounds identical to before this existed.
+
+    edge_voice/edge_rate/edge_pitch only matter when tts.engine is
+    edge_tts -- model stays populated in that mode too, since it is used as
+    this host's piper fallback when edge-tts is unreachable.
     """
 
     def __init__(self, name: str, model: str, length_scale: float,
                  sentence_silence: float, noise_scale: float = 0.667,
-                 noise_w: float = 0.8):
+                 noise_w: float = 0.8, edge_voice: str = "",
+                 edge_rate: str = "+0%", edge_pitch: str = "+0Hz"):
         self.name = name
         self.model = model
         self.length_scale = length_scale
         self.sentence_silence = sentence_silence
         self.noise_scale = noise_scale
         self.noise_w = noise_w
+        self.edge_voice = edge_voice
+        self.edge_rate = edge_rate
+        self.edge_pitch = edge_pitch
 
     @property
     def available(self) -> bool:
@@ -78,7 +91,8 @@ class Voice:
 
     def key(self) -> str:
         return (f"{self.model}|{self.length_scale}|{self.sentence_silence}|"
-               f"{self.noise_scale}|{self.noise_w}")
+               f"{self.noise_scale}|{self.noise_w}|{self.edge_voice}|"
+               f"{self.edge_rate}|{self.edge_pitch}")
 
 
 class TTS:
@@ -94,6 +108,17 @@ class TTS:
         # defaults are exactly Piper's own stock values.
         self.noise_scale = float(cfg.get("tts.noise_scale", 0.667))
         self.noise_w = float(cfg.get("tts.noise_w", 0.8))
+        # Only read when engine: edge_tts. edge_voice is a voice id from
+        # `edge-tts --list-voices` (e.g. en-US-AriaNeural); rate/pitch are
+        # its own nudge syntax, "+0%"/"+0Hz" for stock delivery.
+        self.edge_voice = str(cfg.get("tts.edge_voice", "") or "")
+        self.edge_rate = str(cfg.get("tts.edge_rate", "") or "") or "+0%"
+        self.edge_pitch = str(cfg.get("tts.edge_pitch", "") or "") or "+0Hz"
+        # Which piper flavour to fall back to when edge_tts is the primary
+        # engine and a render fails -- offline, rate-limited, or Microsoft
+        # changes the unofficial endpoint. Not an official product, so this
+        # fallback is what keeps patter alive rather than just going silent.
+        self.fallback_engine = str(cfg.get("tts.fallback_engine", "piper_cli")).lower()
         self.timeout = int(cfg.get("tts.timeout_seconds", 180))
         self.loudnorm = bool(cfg.get("tts.loudnorm", True))
         # Beat between one host finishing and the other starting. Real people
@@ -134,6 +159,12 @@ class TTS:
             model = str(host.get("voice_model") or "").strip()
             if not model:
                 model = self.voice_model if index == 0 else self._sibling_voice()
+            # No shared catalog to guess a co-host edge voice from (unlike
+            # the piper sibling file), so only the first host inherits the
+            # station default -- a second host needs its own edge_voice set.
+            edge_voice = str(host.get("edge_voice") or "").strip()
+            if not edge_voice and index == 0:
+                edge_voice = self.edge_voice
             voices[name] = Voice(
                 name=name,
                 model=model,
@@ -142,6 +173,9 @@ class TTS:
                                          self.sentence_silence),
                 noise_scale=_number(host.get("noise_scale"), self.noise_scale),
                 noise_w=_number(host.get("noise_w"), self.noise_w),
+                edge_voice=edge_voice,
+                edge_rate=str(host.get("edge_rate") or "").strip() or self.edge_rate,
+                edge_pitch=str(host.get("edge_pitch") or "").strip() or self.edge_pitch,
             )
         if not voices:
             voices["DJ"] = Voice("DJ", self.voice_model, self.length_scale,
@@ -162,9 +196,13 @@ class TTS:
 
     @property
     def hosts(self) -> list[str]:
-        """Host names whose voice model is actually on disk."""
+        """Host names who can actually speak, in whatever engine is active."""
         if not self.enabled:
             return []
+        if self.engine == "edge_tts":
+            # Either a real edge voice, or a piper model to fall back to.
+            return [name for name, voice in self.voices.items()
+                   if voice.edge_voice or voice.available]
         if not self.engine.startswith("piper"):
             # espeak ignores the model entirely, so every host can speak --
             # they will just all sound the same.
@@ -186,14 +224,20 @@ class TTS:
         return self.engine != "none"
 
     def _base_command(self) -> list[str] | None:
-        if self.engine == "piper_cli":
+        return self._command_for(self.engine)
+
+    def _command_for(self, engine: str) -> list[str] | None:
+        if engine == "piper_cli":
             exe = shutil.which("piper")
             return [exe] if exe else None
-        if self.engine == "piper_python":
+        if engine == "piper_python":
             import sys
             return [sys.executable, "-m", "piper"]
-        if self.engine == "espeak":
+        if engine == "espeak":
             exe = shutil.which("espeak-ng") or shutil.which("espeak")
+            return [exe] if exe else None
+        if engine == "edge_tts":
+            exe = shutil.which("edge-tts")
             return [exe] if exe else None
         return None
 
@@ -201,6 +245,9 @@ class TTS:
         """Probe the configured engine. Returns (ok, human readable detail)."""
         if not self.enabled:
             return True, "tts disabled (engine: none) - music only, no patter"
+
+        if self.engine == "edge_tts":
+            return self._check_edge()
 
         base = self._base_command()
         if base is None:
@@ -232,6 +279,60 @@ class TTS:
         if silent:
             detail += (f" (no model on disk for {', '.join(silent)}, so they "
                        "will not speak)")
+        return True, detail
+
+    def _check_edge(self) -> tuple[bool, str]:
+        """edge_tts probe: try the real thing first, then confirm the piper
+        fallback actually works so a blocked/offline endpoint is a warning,
+        not a silent outage."""
+        primary = self.voice_for(None)
+        edge_exe = shutil.which("edge-tts")
+        ffmpeg_exe = shutil.which("ffmpeg")
+
+        with tempfile.TemporaryDirectory(prefix="airadio-tts-") as tmp:
+            edge_ok = False
+            if edge_exe and ffmpeg_exe and primary.edge_voice:
+                produced = self._synthesize_edge(
+                    "Radio check, one two.", Path(tmp) / "probe-edge.wav", primary)
+                edge_ok = bool(produced and produced.exists()
+                              and produced.stat().st_size > 1000)
+
+            if not edge_ok:
+                fallback = self._synthesize_piper(
+                    "Radio check, one two.", Path(tmp) / "probe-fallback.wav",
+                    primary, self.fallback_engine)
+                fallback_ok = bool(fallback and fallback.exists()
+                                   and fallback.stat().st_size > 1000)
+                if not fallback_ok:
+                    reasons = []
+                    if not edge_exe:
+                        reasons.append("edge-tts not found on PATH")
+                    if not ffmpeg_exe:
+                        reasons.append("ffmpeg not found (needed to convert edge-tts's mp3)")
+                    if not primary.edge_voice:
+                        reasons.append("tts.edge_voice is not set")
+                    if not reasons:
+                        reasons.append("edge-tts request failed (offline, or the "
+                                       "unofficial endpoint is blocked)")
+                    return False, ("edge-tts unavailable (" + "; ".join(reasons) +
+                                   ") and the piper fallback (" +
+                                   f"{self.fallback_engine}) also failed")
+                self._ok = True
+                self._failures = 0
+                self._muted_until = 0.0
+                return True, (f"edge-tts is not working right now (see log), but "
+                              f"the {self.fallback_engine} fallback is -- patter "
+                              "will render with piper until edge-tts comes back")
+
+        self._ok = True
+        self._failures = 0
+        self._muted_until = 0.0
+        speaking = self.hosts
+        silent = [name for name in self.voices if name not in speaking]
+        detail = f"edge-tts ok, voices: {', '.join(speaking) or 'none'}"
+        if silent:
+            detail += (f" (no edge_voice or piper fallback for "
+                       f"{', '.join(silent)}, so they will not speak)")
         return True, detail
 
     def check_exchange(self) -> tuple[bool, str]:
@@ -382,14 +483,89 @@ class TTS:
     # -- engines ------------------------------------------------------------
 
     def _synthesize(self, text: str, out_path: Path, voice: Voice) -> Path | None:
-        base = self._base_command()
-        if base is None:
-            return None
+        if self.engine == "edge_tts":
+            produced = self._synthesize_edge(text, out_path, voice)
+            if produced is not None:
+                return produced
+            log.debug("edge-tts unavailable for this line, falling back to %s",
+                      self.fallback_engine)
+            return self._synthesize_piper(text, out_path, voice, self.fallback_engine)
 
         if self.engine == "espeak":
-            command = base + ["-w", str(out_path), "-s", "150", "--stdin"]
-            return self._run(command, text, out_path)
+            return self._synthesize_espeak(text, out_path)
 
+        return self._synthesize_piper(text, out_path, voice, self.engine)
+
+    def _synthesize_espeak(self, text: str, out_path: Path) -> Path | None:
+        base = self._command_for("espeak")
+        if base is None:
+            return None
+        command = base + ["-w", str(out_path), "-s", "150", "--stdin"]
+        return self._run(command, text, out_path)
+
+    def _synthesize_edge(self, text: str, out_path: Path, voice: Voice) -> Path | None:
+        """Microsoft Edge's free neural voices, via the edge-tts package.
+
+        Unofficial endpoint, so this is expected to fail sometimes -- offline,
+        rate-limited, or Microsoft changes something. Every failure here is
+        silent by design; the caller falls back to piper.
+        """
+        if not voice.edge_voice:
+            return None
+        exe = shutil.which("edge-tts")
+        if not exe:
+            return None
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            # edge-tts only speaks mp3; with no way to get a wav out of that,
+            # do not even try.
+            return None
+
+        with tempfile.TemporaryDirectory(prefix="airadio-edge-") as tmp:
+            mp3_path = Path(tmp) / "raw.mp3"
+            command = [exe, "--voice", voice.edge_voice]
+            if voice.edge_rate and voice.edge_rate != "+0%":
+                command += ["--rate", voice.edge_rate]
+            if voice.edge_pitch and voice.edge_pitch != "+0Hz":
+                command += ["--pitch", voice.edge_pitch]
+            command += ["--text", text, "--write-media", str(mp3_path)]
+            try:
+                completed = subprocess.run(command, stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE, timeout=self.timeout)
+            except subprocess.TimeoutExpired:
+                log.warning("edge-tts timed out after %ss", self.timeout)
+                return None
+            except FileNotFoundError:
+                return None
+            except Exception as exc:
+                log.warning("edge-tts subprocess error: %s", exc)
+                return None
+            if (completed.returncode != 0 or not mp3_path.exists()
+                    or mp3_path.stat().st_size < 500):
+                log.debug("edge-tts failed (%s): %s", completed.returncode,
+                          completed.stderr.decode("utf-8", "replace")[:300])
+                return None
+
+            convert = [ffmpeg, "-y", "-loglevel", "error", "-i", str(mp3_path),
+                      str(out_path)]
+            try:
+                result = subprocess.run(convert, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, timeout=self.timeout)
+            except Exception as exc:
+                log.warning("could not convert edge-tts audio: %s", exc)
+                return None
+            if result.returncode != 0:
+                return None
+
+        if not out_path.exists() or out_path.stat().st_size < 1000:
+            return None
+        return out_path
+
+    def _synthesize_piper(self, text: str, out_path: Path, voice: Voice,
+                          engine: str) -> Path | None:
+        base = self._command_for(engine)
+        if base is None:
+            return None
         if not voice.model:
             return None
 

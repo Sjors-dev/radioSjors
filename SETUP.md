@@ -55,6 +55,18 @@ It is safe to re-run.
 > it runs on anything, and the station still works. You can also set
 > `tts.engine: none` for music with no patter at all.
 
+> **Want more expressive voices than Piper can manage?** Set
+> `tts.engine: edge_tts` and `tts.edge_voice` (and per-host `edge_voice`) in
+> `config/config.local.yaml` to use Microsoft Edge's free neural voices —
+> still no bill, no key, genuinely more human than Piper — via the
+> `edge-tts` package `install.sh` already installed. It's an unofficial
+> endpoint though, not a real product with a support line, so every host
+> keeps its `voice_model` too: a failed edge-tts request (offline,
+> rate-limited, blocked) falls straight back to Piper for that one line, and
+> `doctor` will say plainly if it's currently running on the fallback.
+> `tts-test "a line"` hears the difference immediately. See
+> `config/config.yaml`'s `tts:` section for the full set of options.
+
 ---
 
 ## 3. Fill in `.env`
@@ -291,6 +303,7 @@ Worth knowing about:
 | `dj.segments` | How much extra talk an hour gets. Each value is a `[low, high]` range rolled fresh every hour. `[0, 0]` switches something off; `[2, 2]` pins it. |
 | `dj.max_segment_words` | The ceiling on a long item — a weather moment, a music note, a whole conversation. Raise it if you want them chattier. |
 | `dj.hosts[].noise_scale` / `noise_w` | Piper's own expressiveness knobs, per host. Higher reads more alive; push either far past ~1.0 and it starts sounding rough instead. There is a real ceiling on how expressive a small offline model gets regardless — this helps, it does not transform it. `tts-test --host Nina "line"` to hear a change without waiting for a whole hour. |
+| `tts.engine: edge_tts` + `tts.edge_voice` / `dj.hosts[].edge_voice` | Swap Piper for Microsoft Edge's free neural voices — real prosody, still no bill. Unofficial endpoint, so `voice_model` stays set on every host as the automatic per-line fallback if edge-tts is offline or blocked; `doctor` says which one is actually in use. |
 | `weather.*` | Where the weather comes from. Change `place_name`, `latitude` and `longitude` if you move. `enabled: false` and they never mention it. |
 | `planner.mood_map[].genres` | Narrows an hour's candidates to tracks tagged anything close to these words, before energy is even considered — the reason a rock hour stops pulling in jazz or Christmas music at the same tempo. Loose substring matching, e.g. `rock` also catches `alternative rock`. Skipped automatically if too few of the library are tagged close enough yet (watch for "widening past genre" in the brain log). |
 | `planner.mood_map` | Time-of-day → mood and energy band. Hour ranges must cover 0–23. |

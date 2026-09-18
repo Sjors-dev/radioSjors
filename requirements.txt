@@ -5,3 +5,6 @@ python-dotenv>=1.0
 mutagen>=1.47
 yt-dlp>=2024.8.6
 discord.py>=2.3
+# Pure Python, no compiled bits, so it installs fine even where piper-tts
+# can't -- only used when config/config.yaml sets tts.engine: edge_tts.
+edge-tts>=6.1

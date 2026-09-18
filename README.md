@@ -68,7 +68,7 @@ Kill the brain and the music keeps playing. That is the point, and
 | `airadio/library.py` | Scan the music folder, read/write tags, de-duplicate by tags *and* by content hash, ban/unban |
 | `airadio/discovery.py` | Last.fm client: real similar artists and tracks, plus reference durations |
 | `airadio/downloader.py` | yt-dlp wrapper and the quality filters that make it usable |
-| `airadio/tts.py` | Piper (or espeak) renderer, a voice per host, stitches a two-host exchange into one file |
+| `airadio/tts.py` | Piper (or espeak, or edge-tts with Piper as its fallback) renderer, a voice per host, stitches a two-host exchange into one file |
 | `airadio/weather.py` | Open-Meteo. Free, keyless, and never fatal — no reading means the hosts skip it |
 | `airadio/publisher.py` | Pushes now-playing and the queue to a secret gist, which the website reads |
 | `airadio/brain/llm.py` | Gemini ⇄ Groq with failover and rate-limit cooldown |
@@ -109,6 +109,13 @@ but `dj.hosts[].noise_scale`/`noise_w` (Piper's own VITS knobs, one host can
 sound more animated than another) and how much punctuation the writing itself
 leans on are both real, tunable levers, not just speed. `tts-test --host Nina
 "a line"` hears a change immediately, without waiting for a whole hour.
+
+For a bigger jump, `tts.engine: edge_tts` swaps Piper for Microsoft Edge's
+free neural voices — still no bill, no key, noticeably more human. It is an
+unofficial endpoint reached over the network rather than a real product, so
+every host keeps its Piper `voice_model` too: a failed edge-tts request for
+one line falls straight back to Piper rather than skipping the line, and
+`doctor` reports plainly when it is currently running on that fallback.
 
 ---
 
@@ -196,8 +203,8 @@ caster.fm, if you choose a paid tier there.
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-169 offline tests — no network, no ffmpeg, no liquidsoap needed. They cover
+224 offline tests — no network, no ffmpeg, no liquidsoap needed. They cover
 the quality filters, de-duplication, banning, the fallback planner, artist
 spacing, queue claiming, LLM failover, the liquidsoap telnet protocol, the
 weather briefing, two-host conversation validation and rendering, the schema
-migration, and what the website gets told.
+migration, the edge-tts/piper fallback, and what the website gets told.

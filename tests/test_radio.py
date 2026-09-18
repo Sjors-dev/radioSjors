@@ -2166,6 +2166,195 @@ class _FakeCompleted:
         self.stderr = stderr
 
 
+def _output_path(command):
+    """Where a faked command would have written its audio, going by which
+    output flag is present -- edge-tts, piper, or a bare ffmpeg convert."""
+    for flag in ("--write-media", "-f", "--output_file", "--output-file"):
+        if flag in command:
+            return Path(command[command.index(flag) + 1])
+    if "-i" in command:
+        return Path(command[-1])
+    return None
+
+
+class TestEdgeTTSFallback(RadioTestCase):
+    """engine: edge_tts tries Microsoft's free neural voices first and falls
+    back to piper per line whenever edge-tts is unreachable -- offline,
+    rate-limited, blocked, or simply not installed. Unofficial endpoint, so
+    the fallback is what keeps patter alive rather than going silent."""
+
+    def _tts_with(self, edge_voice="en-US-AriaNeural", fallback_engine="piper_cli"):
+        data = dict(BASE_CONFIG)
+        data["tts"] = dict(data["tts"], engine="edge_tts",
+                           fallback_engine=fallback_engine,
+                           voice_model="/voices/test.onnx")
+        data["dj"] = dict(data["dj"])
+        data["dj"]["hosts"] = [{
+            "name": "Solo", "voice_model": "/voices/test.onnx",
+            "edge_voice": edge_voice, "length_scale": 1.0,
+        }]
+        return TTS(Config(data, self.tmp))
+
+    def _patched(self, which_map, run_fn):
+        import airadio.tts as tts_module
+        originals = (tts_module.shutil.which, tts_module.subprocess.run)
+        tts_module.shutil.which = lambda name: which_map.get(name)
+        tts_module.subprocess.run = run_fn
+        return tts_module, originals
+
+    def _restore(self, tts_module, originals):
+        tts_module.shutil.which, tts_module.subprocess.run = originals
+
+    def test_edge_tts_is_used_when_it_works(self):
+        tts = self._tts_with()
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            out = _output_path(command)
+            if out is not None:
+                out.write_bytes(b"x" * 2000)
+            return _FakeCompleted(0)
+
+        tts_module, originals = self._patched(
+            {"edge-tts": "/usr/bin/edge-tts", "ffmpeg": "/usr/bin/ffmpeg"},
+            fake_run)
+        try:
+            result = tts._synthesize("hello", self.tmp / "out.wav",
+                                     tts.voices["Solo"])
+        finally:
+            self._restore(tts_module, originals)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(len(calls), 2, "one edge-tts call, one ffmpeg convert")
+        self.assertIn("edge-tts", calls[0][0])
+        self.assertIn("en-US-AriaNeural", calls[0])
+        self.assertTrue(all("-m" not in c for c in calls), "piper never ran")
+
+    def test_a_failed_edge_request_falls_back_to_piper(self):
+        tts = self._tts_with()
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if "edge-tts" in command[0]:
+                return _FakeCompleted(1, b"blocked")
+            out = _output_path(command)
+            if out is not None:
+                out.write_bytes(b"x" * 2000)
+            return _FakeCompleted(0)
+
+        tts_module, originals = self._patched(
+            {"edge-tts": "/usr/bin/edge-tts", "ffmpeg": "/usr/bin/ffmpeg",
+             "piper": "/usr/bin/piper"}, fake_run)
+        try:
+            result = tts._synthesize("hello", self.tmp / "out.wav",
+                                     tts.voices["Solo"])
+        finally:
+            self._restore(tts_module, originals)
+
+        self.assertIsNotNone(result, "a blocked edge-tts must not silence the line")
+        self.assertEqual(len(calls), 2, "one failed edge-tts call, one piper retry")
+        self.assertIn("edge-tts", calls[0][0])
+        self.assertIn("-m", calls[1])
+
+    def test_missing_ffmpeg_skips_edge_and_goes_straight_to_piper(self):
+        # edge-tts only speaks mp3, so with no ffmpeg to convert it there is
+        # nothing useful edge-tts could do -- do not even call it.
+        tts = self._tts_with()
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            out = _output_path(command)
+            if out is not None:
+                out.write_bytes(b"x" * 2000)
+            return _FakeCompleted(0)
+
+        tts_module, originals = self._patched(
+            {"edge-tts": "/usr/bin/edge-tts", "piper": "/usr/bin/piper"},
+            fake_run)
+        try:
+            result = tts._synthesize("hello", self.tmp / "out.wav",
+                                     tts.voices["Solo"])
+        finally:
+            self._restore(tts_module, originals)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(len(calls), 1, "no wasted edge-tts call")
+        self.assertIn("-m", calls[0])
+
+    def test_check_reports_the_fallback_by_name_when_edge_is_down(self):
+        tts = self._tts_with()
+
+        def fake_run(command, **kwargs):
+            if "edge-tts" in command[0]:
+                return _FakeCompleted(1, b"blocked")
+            out = _output_path(command)
+            if out is not None:
+                out.write_bytes(b"x" * 2000)
+            return _FakeCompleted(0)
+
+        tts_module, originals = self._patched(
+            {"edge-tts": "/usr/bin/edge-tts", "ffmpeg": "/usr/bin/ffmpeg",
+             "piper": "/usr/bin/piper"}, fake_run)
+        try:
+            ok, detail = tts.check()
+        finally:
+            self._restore(tts_module, originals)
+
+        self.assertTrue(ok, detail)
+        self.assertIn("fallback", detail)
+        self.assertIn("piper_cli", detail)
+
+    def test_check_fails_when_both_edge_and_the_fallback_are_down(self):
+        tts = self._tts_with()
+
+        def fake_run(command, **kwargs):
+            return _FakeCompleted(1, b"nope")
+
+        tts_module, originals = self._patched(
+            {"edge-tts": "/usr/bin/edge-tts", "ffmpeg": "/usr/bin/ffmpeg",
+             "piper": "/usr/bin/piper"}, fake_run)
+        try:
+            ok, detail = tts.check()
+        finally:
+            self._restore(tts_module, originals)
+
+        self.assertFalse(ok)
+        self.assertIn("piper_cli", detail)
+
+    def test_a_host_with_only_an_edge_voice_can_still_speak(self):
+        # No piper model on disk for this host at all -- edge_voice alone is
+        # enough to count as "can speak" for engine: edge_tts.
+        data = dict(BASE_CONFIG)
+        data["tts"] = dict(data["tts"], engine="edge_tts")
+        data["dj"] = dict(data["dj"])
+        data["dj"]["hosts"] = [{
+            "name": "Solo", "voice_model": "/does/not/exist.onnx",
+            "edge_voice": "en-US-AriaNeural"}]
+        tts = TTS(Config(data, self.tmp))
+        self.assertEqual(tts.hosts, ["Solo"])
+
+    def test_a_host_with_only_a_piper_model_can_still_speak(self):
+        # No edge voice configured -- still speaks, just always via fallback.
+        voice = self.cfg.path("state") / "fallback-only.onnx"
+        voice.write_bytes(b"not really a model, but it exists")
+        data = dict(BASE_CONFIG)
+        data["tts"] = dict(data["tts"], engine="edge_tts")
+        data["dj"] = dict(data["dj"])
+        data["dj"]["hosts"] = [{"name": "Solo", "voice_model": str(voice),
+                                "edge_voice": ""}]
+        tts = TTS(Config(data, self.tmp))
+        self.assertEqual(tts.hosts, ["Solo"])
+
+    def test_edge_voice_is_part_of_the_cache_key(self):
+        base = self._tts_with(edge_voice="en-US-AriaNeural")
+        other = self._tts_with(edge_voice="en-US-GuyNeural")
+        self.assertNotEqual(base.voices["Solo"].key(),
+                            other.voices["Solo"].key())
+
+
 class TestStitchingAudio(RadioTestCase):
     """The conversation splicer, which is the one bit of new audio handling.
 

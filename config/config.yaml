@@ -40,6 +40,10 @@ dj:
   # next to the first one, which is where install.sh puts it. A host whose
   # model is not on disk is silently left out of the show rather than being
   # read in somebody else's voice.
+  #
+  # edge_voice: only read when tts.engine: edge_tts. Unlike voice_model there
+  # is no sibling file to guess a second one from, so a co-host needs their
+  # own edge_voice set explicitly or they just use the piper fallback.
   hosts:
     - name: Ray
       character: >
@@ -47,6 +51,7 @@ dj:
         than selling it to you. Still sounds like he means it, not bored --
         dry is a tone of voice, not a flat one.
       voice_model: ""
+      edge_voice: ""
       length_scale:
       # A small lift off Piper's stock values (0.667 / 0.8) -- see tts.noise_*
       # above. Ray stays understated on purpose, so this is modest.
@@ -60,6 +65,7 @@ dj:
         not reading off a card: real enthusiasm, an actual laugh in her
         voice sometimes, sentences that speed up when she means it.
       voice_model: ""
+      edge_voice: ""
       length_scale:
       # More lift than Ray's -- she is the more animated of the two. Tune by
       # ear: too high starts sounding rough rather than lively.
@@ -99,9 +105,18 @@ tts:
   # piper_cli      -> the `piper` executable on PATH (recommended)
   # piper_python   -> `python -m piper` from the piper-tts pip package
   # espeak         -> espeak-ng; ugly but runs on literally any CPU
+  # edge_tts       -> Microsoft Edge's free neural voices (the `edge-tts`
+  #                   package). Genuinely more expressive than Piper and
+  #                   still free, but it is an unofficial endpoint reached
+  #                   over the network -- no key, no SLA, could be blocked
+  #                   or rate-limited without warning. Needs ffmpeg (it only
+  #                   speaks mp3) and every host still needs voice_model
+  #                   below set, because that is the fallback used whenever
+  #                   edge-tts is unreachable for a given line.
   # none           -> disable patter entirely (music only)
   engine: piper_cli
-  # Path to the .onnx voice model. install.sh downloads this one.
+  # Path to the .onnx voice model. install.sh downloads this one. Also used
+  # as the piper fallback when engine: edge_tts.
   voice_model: /opt/ai-radio/voices/en_US-amy-medium.onnx
   # Piper speed; 1.0 = normal, higher = slower. Stay near 1.0: slowing the
   # voice down does not make it sound more natural, it sounds sedated.
@@ -121,6 +136,17 @@ tts:
   # delivery on their own.
   noise_scale: 0.667
   noise_w: 0.8
+  # Only read when engine: edge_tts. Voice id from `edge-tts --list-voices`,
+  # e.g. en-US-AriaNeural, en-GB-RyanNeural -- pick per host below instead
+  # for two different voices; this is just the station-wide default (host 1
+  # only, mirrors voice_model). rate/pitch are edge-tts's own nudge syntax,
+  # "+0%"/"+0Hz" for stock delivery.
+  edge_voice: ""
+  edge_rate: "+0%"
+  edge_pitch: "+0Hz"
+  # Only read when engine: edge_tts. Which piper flavour a failed edge-tts
+  # request falls back to for that one line.
+  fallback_engine: piper_cli
   # Normalise patter loudness to roughly match music (needs ffmpeg).
   loudnorm: true
   # Give up on a render after this many seconds (Celeron safety valve).
