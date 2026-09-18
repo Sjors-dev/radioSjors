@@ -11,7 +11,7 @@ paths:
   logs: logs
 
 station:
-  name: "Private Radio"
+  name: "Radio Sjors"
   description: "AI-programmed personal radio"
   genre: "Various"
   # Bitrate for the mp3 sent to caster.fm. 128 is plenty and cheap on a Celeron.
