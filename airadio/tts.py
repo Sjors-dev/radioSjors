@@ -549,10 +549,14 @@ class TTS:
         with tempfile.TemporaryDirectory(prefix="airadio-edge-") as tmp:
             mp3_path = Path(tmp) / "raw.mp3"
             command = [exe, "--voice", voice.edge_voice]
+            # --rate/--pitch as one "=" token, not two argv entries: a
+            # negative value like "-12%" starts with "-", and argparse (which
+            # edge-tts's CLI uses) reads a bare "-12%" as another flag rather
+            # than this one's value.
             if voice.edge_rate and voice.edge_rate != "+0%":
-                command += ["--rate", voice.edge_rate]
+                command.append(f"--rate={voice.edge_rate}")
             if voice.edge_pitch and voice.edge_pitch != "+0Hz":
-                command += ["--pitch", voice.edge_pitch]
+                command.append(f"--pitch={voice.edge_pitch}")
             command += ["--text", text, "--write-media", str(mp3_path)]
             try:
                 completed = subprocess.run(command, stdout=subprocess.PIPE,

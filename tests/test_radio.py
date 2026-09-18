@@ -2183,16 +2183,20 @@ class TestEdgeTTSFallback(RadioTestCase):
     rate-limited, blocked, or simply not installed. Unofficial endpoint, so
     the fallback is what keeps patter alive rather than going silent."""
 
-    def _tts_with(self, edge_voice="en-US-AriaNeural", fallback_engine="piper_cli"):
+    def _tts_with(self, edge_voice="en-US-AriaNeural", fallback_engine="piper_cli",
+                 edge_rate=None, edge_pitch=None):
         data = dict(BASE_CONFIG)
         data["tts"] = dict(data["tts"], engine="edge_tts",
                            fallback_engine=fallback_engine,
                            voice_model="/voices/test.onnx")
         data["dj"] = dict(data["dj"])
-        data["dj"]["hosts"] = [{
-            "name": "Solo", "voice_model": "/voices/test.onnx",
-            "edge_voice": edge_voice, "length_scale": 1.0,
-        }]
+        host = {"name": "Solo", "voice_model": "/voices/test.onnx",
+               "edge_voice": edge_voice, "length_scale": 1.0}
+        if edge_rate is not None:
+            host["edge_rate"] = edge_rate
+        if edge_pitch is not None:
+            host["edge_pitch"] = edge_pitch
+        data["dj"]["hosts"] = [host]
         return TTS(Config(data, self.tmp))
 
     def _patched(self, which_map, run_fn):
@@ -2353,6 +2357,36 @@ class TestEdgeTTSFallback(RadioTestCase):
         other = self._tts_with(edge_voice="en-US-GuyNeural")
         self.assertNotEqual(base.voices["Solo"].key(),
                             other.voices["Solo"].key())
+
+    def test_a_negative_rate_is_one_token_not_two(self):
+        # "--rate", "-12%" as separate argv entries reads as two flags to
+        # argparse (edge-tts's own CLI), since "-12%" itself starts with "-".
+        # "--rate=-12%" sidesteps that ambiguity entirely.
+        tts = self._tts_with(edge_rate="-12%", edge_pitch="-5Hz")
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            out = _output_path(command)
+            if out is not None:
+                out.write_bytes(b"x" * 2000)
+            return _FakeCompleted(0)
+
+        tts_module, originals = self._patched(
+            {"edge-tts": "/usr/bin/edge-tts", "ffmpeg": "/usr/bin/ffmpeg"},
+            fake_run)
+        try:
+            result = tts._synthesize("hello", self.tmp / "out.wav",
+                                     tts.voices["Solo"])
+        finally:
+            self._restore(tts_module, originals)
+
+        self.assertIsNotNone(result)
+        edge_command = calls[0]
+        self.assertIn("--rate=-12%", edge_command)
+        self.assertIn("--pitch=-5Hz", edge_command)
+        self.assertNotIn("-12%", edge_command, "must not be its own argv entry")
+        self.assertNotIn("-5Hz", edge_command, "must not be its own argv entry")
 
 
 class TestStitchingAudio(RadioTestCase):
