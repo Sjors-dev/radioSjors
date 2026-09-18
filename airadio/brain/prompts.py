@@ -25,6 +25,13 @@ Rules you must not break:
   A synthetic voice has no breath control, so a long winding sentence comes out
   flat and rushed, while short ones land. Use full stops rather than commas
   wherever the sense allows.
+- The synthetic voice takes its cue from punctuation more than from the words
+  themselves. A line that should sound genuinely excited needs an exclamation
+  mark, not just enthusiastic-sounding words with a full stop -- the words
+  alone read flat. Match punctuation to how each host actually talks: more
+  exclamation marks and short, quick sentences for someone animated, plainer
+  full stops for someone dry and unhurried. Use this for real, not on every
+  line -- a host who is excited about everything stops sounding like anyone.
 - Do not play the same artist again within {artist_spacing} songs. No back-to-back
   pairs from one artist, no "two in a row" sets. Spread each artist out across
   the hour. If the candidate list is too small to manage that, get as close as

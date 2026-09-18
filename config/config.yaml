@@ -44,15 +44,27 @@ dj:
     - name: Ray
       character: >
         Dry, unhurried, has heard all of it before. Hands you a record rather
-        than selling it to you.
+        than selling it to you. Still sounds like he means it, not bored --
+        dry is a tone of voice, not a flat one.
       voice_model: ""
       length_scale:
+      # A small lift off Piper's stock values (0.667 / 0.8) -- see tts.noise_*
+      # above. Ray stays understated on purpose, so this is modest.
+      noise_scale: 0.70
+      noise_w: 0.85
     - name: Nina
       character: >
         Quicker, more curious, happy to push back. Asks the question the
-        listener would ask, and does not always agree with Ray.
+        listener would ask, and does not always agree with Ray. Genuinely
+        into the music -- sounds like it. Reads as someone leaning forward,
+        not reading off a card: real enthusiasm, an actual laugh in her
+        voice sometimes, sentences that speed up when she means it.
       voice_model: ""
       length_scale:
+      # More lift than Ray's -- she is the more animated of the two. Tune by
+      # ear: too high starts sounding rough rather than lively.
+      noise_scale: 0.90
+      noise_w: 1.00
 
   language: english         # english | dutch  (must match the Piper voice below)
   # A spoken item is inserted before every Nth track. 1 = before every track.
@@ -98,6 +110,17 @@ tts:
   # Seconds of silence after each sentence. 0.3-0.5 reads like someone
   # taking a breath; this is the single biggest win for sounding human.
   sentence_silence: 0.4
+  # Piper's own expressiveness knobs (straight from the underlying VITS
+  # model, nothing custom). noise_scale varies the acoustic generation --
+  # higher sounds more alive, push it too far and it gets rough/unstable.
+  # noise_w varies phoneme duration -- higher reads less metronomic, more
+  # human. Both default to Piper's own stock values (0.667 / 0.8) and are
+  # worth tuning per host below rather than here; there is a real ceiling
+  # on how expressive a small offline model can sound regardless of these,
+  # so treat them as a genuine but modest lever, not a fix for monotone
+  # delivery on their own.
+  noise_scale: 0.667
+  noise_w: 0.8
   # Normalise patter loudness to roughly match music (needs ffmpeg).
   loudnorm: true
   # Give up on a render after this many seconds (Celeron safety valve).
@@ -153,35 +176,56 @@ planner:
   # so only a few of each are added -- enough to be pickable.
   exemplar_artist_tracks: 3
   # Hour ranges are [start, end) in 24h local time and must cover 0-23.
+  # `genres:` on an entry (optional) narrows the candidate pool to tracks
+  # whose stored genre/tags contain any of the listed words BEFORE energy is
+  # even considered -- energy alone cannot tell a soft rock hour from a jazz
+  # one at the same tempo, and without this the model is just handed a
+  # random slice of the whole library and has to guess genre from the mood
+  # text alone. Loose substring matching against whatever Last.fm tagged the
+  # track with at download time, so "rock" also matches "alternative rock"
+  # or "90s rock" -- no need to list every variant. Leave it out on an entry
+  # and that hour works exactly as before (energy and mood text only). If
+  # too few tracks in the library match yet, the filter is skipped for that
+  # hour rather than starving it -- check the brain log for "widening past
+  # genre" to see when that happens; it means more of that genre needs
+  # downloading, or the words here need to match your library's actual tags
+  # (`main.py plan --dry-run` shows each candidate's tags).
   mood_map:
     - hours: [0, 5]
       name: "late night"
       mood: "slow, Atmospheric rap: just some rap music to vibe on. Nothing too hard or rage rap like"
       energy: [1, 2]
+      genres: [rap, hip hop]
     - hours: [5, 10]
       name: "morning"
       mood: "Soft Rock music. think smashing pumpkins, radiohead, and other artists like this. Nothing too hard, just some morning tunes."
       energy: [2, 3]
+      genres: [rock, alternative, indie]
     - hours: [9, 12]
       name: "late morning"
       mood: "Chill Rap to focus/study too. Think Kanye West, Kendrick lamar, Lil Yachty, and other artists like this. Music that gives you focus but still gives that morning chill."
       energy: [2, 4]
+      genres: [rap, hip hop]
     - hours: [12, 14]
       name: "midday"
       mood: "Upbeat hard rap. This should give me energy to go through to the day. Make me bop my head. Can be quite energetic "
       energy: [3, 4]
+      genres: [rap, hip hop]
     - hours: [14, 16]
       name: "afternoon"
       mood: "Upbeat hard rap. This should give me energy to go through to the day. Make me bop my head. Can be quite energetic"
       energy: [3, 4]
+      genres: [rap, hip hop]
     - hours: [16, 20]
       name: "evening"
       mood: "Jazz music to relax too. This can be quite slow viby jazz music. I want to hear this after a long day"
       energy: [2, 4]
+      genres: [jazz]
     - hours: [20, 24]
       name: "night"
       mood: "Nightly viby Rap music. Make it Atmospheric, night vibes. Can be a little energetic"
       energy: [2, 3]
+      genres: [rap, hip hop]
 
 llm:
   # Failover order. First provider that answers wins; 429/5xx falls through.

@@ -104,6 +104,12 @@ Weather comes from Open-Meteo: free, no key, no account. An hour with no
 weather slot is not shown the briefing at all, because a model will use
 anything you give it.
 
+Piper is a small offline voice, so it has a real ceiling on expressiveness —
+but `dj.hosts[].noise_scale`/`noise_w` (Piper's own VITS knobs, one host can
+sound more animated than another) and how much punctuation the writing itself
+leans on are both real, tunable levers, not just speed. `tts-test --host Nina
+"a line"` hears a change immediately, without waiting for a whole hour.
+
 ---
 
 ## Commands

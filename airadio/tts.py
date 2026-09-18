@@ -51,21 +51,34 @@ def _number(value, default: float) -> float:
 
 
 class Voice:
-    """One host's speaking settings."""
+    """One host's speaking settings.
+
+    length_scale and sentence_silence control pacing. noise_scale and
+    noise_w are Piper's own VITS-inherited expressiveness knobs: noise_scale
+    varies the acoustic generation itself (higher = more vocal variation,
+    can start sounding rough if pushed too far), noise_w varies phoneme
+    duration (higher = less metronomic, more natural-sounding rhythm). Both
+    default to exactly Piper's own stock values, so a host that does not set
+    them sounds identical to before this existed.
+    """
 
     def __init__(self, name: str, model: str, length_scale: float,
-                 sentence_silence: float):
+                 sentence_silence: float, noise_scale: float = 0.667,
+                 noise_w: float = 0.8):
         self.name = name
         self.model = model
         self.length_scale = length_scale
         self.sentence_silence = sentence_silence
+        self.noise_scale = noise_scale
+        self.noise_w = noise_w
 
     @property
     def available(self) -> bool:
         return bool(self.model) and Path(self.model).exists()
 
     def key(self) -> str:
-        return f"{self.model}|{self.length_scale}|{self.sentence_silence}"
+        return (f"{self.model}|{self.length_scale}|{self.sentence_silence}|"
+               f"{self.noise_scale}|{self.noise_w}")
 
 
 class TTS:
@@ -77,6 +90,10 @@ class TTS:
         # A beat between sentences. Does more for how natural a line sounds
         # than slowing the whole voice down, which just sounds sedated.
         self.sentence_silence = float(cfg.get("tts.sentence_silence", 0.0))
+        # Piper's own expressiveness knobs. See Voice's docstring; these
+        # defaults are exactly Piper's own stock values.
+        self.noise_scale = float(cfg.get("tts.noise_scale", 0.667))
+        self.noise_w = float(cfg.get("tts.noise_w", 0.8))
         self.timeout = int(cfg.get("tts.timeout_seconds", 180))
         self.loudnorm = bool(cfg.get("tts.loudnorm", True))
         # Beat between one host finishing and the other starting. Real people
@@ -87,6 +104,7 @@ class TTS:
         self._output_flag: str | None = None
         self._length_flag: str | None = None
         self._silence_supported = True
+        self._noise_supported = True
         self._ok = False
         # Circuit breaker: once the engine is clearly broken, stop paying for a
         # doomed subprocess per patter line (a whole block's worth, every hour,
@@ -122,10 +140,13 @@ class TTS:
                 length_scale=_number(host.get("length_scale"), self.length_scale),
                 sentence_silence=_number(host.get("sentence_silence"),
                                          self.sentence_silence),
+                noise_scale=_number(host.get("noise_scale"), self.noise_scale),
+                noise_w=_number(host.get("noise_w"), self.noise_w),
             )
         if not voices:
             voices["DJ"] = Voice("DJ", self.voice_model, self.length_scale,
-                                 self.sentence_silence)
+                                 self.sentence_silence, self.noise_scale,
+                                 self.noise_w)
         return voices
 
     def _sibling_voice(self) -> str:
@@ -387,28 +408,54 @@ class TTS:
                 command = base + ["-m", voice.model, output_flag, str(out_path)]
                 if length_flag and abs(voice.length_scale - 1.0) > 0.001:
                     command += [length_flag, str(voice.length_scale)]
-                    # Match the flag style piper accepted for length.
-                    silence_flag = ("--sentence_silence" if "_" in length_flag
-                                    else "--sentence-silence")
+                    underscore = "_" in length_flag
                 elif self._length_flag:
-                    silence_flag = ("--sentence_silence"
-                                    if "_" in self._length_flag
-                                    else "--sentence-silence")
+                    underscore = "_" in self._length_flag
                 else:
-                    silence_flag = None
+                    # Not known yet -- piper's own CLI uses underscores, so
+                    # guess that until a probe below proves otherwise.
+                    underscore = True
+
+                # Match whatever spelling style length_scale is using (or
+                # would use), so one working style is used consistently
+                # rather than mixing --length_scale with --noise-scale.
+                silence_flag = "--sentence_silence" if underscore else "--sentence-silence"
+                noise_scale_flag = "--noise_scale" if underscore else "--noise-scale"
+                noise_w_flag = "--noise_w" if underscore else "--noise-w"
 
                 pause = voice.sentence_silence if self._silence_supported else 0.0
-                if silence_flag and pause > 0:
+                if pause > 0:
                     command += [silence_flag, str(pause)]
 
-                result = self._run(command, text, out_path)
+                extras: list[str] = []
+                if self._noise_supported:
+                    if abs(voice.noise_scale - 0.667) > 0.001:
+                        extras += [noise_scale_flag, str(voice.noise_scale)]
+                    if abs(voice.noise_w - 0.8) > 0.001:
+                        extras += [noise_w_flag, str(voice.noise_w)]
+
+                result = self._run(command + extras, text, out_path)
                 if result is not None:
                     self._output_flag = output_flag
                     self._length_flag = length_flag
                     return result
 
-                # A pause between sentences is a nicety, not worth failing for.
-                if silence_flag and pause > 0:
+                # Piper rejected something. Peel off the newest, least-tested
+                # addition first (noise, then the pause) rather than giving
+                # up on the whole line -- a flatter-sounding voice beats no
+                # patter at all.
+                if extras:
+                    result = self._run(command, text, out_path)
+                    if result is not None:
+                        self._output_flag = output_flag
+                        self._length_flag = length_flag
+                        self._noise_supported = False
+                        log.info("piper rejected %s/%s, continuing without "
+                                 "the expressiveness tuning", noise_scale_flag,
+                                 noise_w_flag)
+                        return result
+
+                if pause > 0:
                     retry = [part for part in command
                              if part not in (silence_flag, str(pause))]
                     result = self._run(retry, text, out_path)

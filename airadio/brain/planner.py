@@ -73,7 +73,8 @@ class Planner:
 
     def select_candidates(self, energy_range: list[int], pool_size: int,
                           focus_artists: list[str] | None = None,
-                          exemplar_artists: list[str] | None = None) -> list[dict]:
+                          exemplar_artists: list[str] | None = None,
+                          genres: list[str] | None = None) -> list[dict]:
         """Tracks eligible for this hour, newest-cooldown and energy aware.
 
         Two ways an artist can be named, and they mean different things:
@@ -87,18 +88,39 @@ class Planner:
 
         Either way they have to reach the pool. An instruction to lean towards
         an artist is worthless if the model is only shown two of their tracks.
+
+        `genres` (from `planner.mood_map`'s own `genres:` list, if set) narrows
+        the pool to tracks tagged anything close to it before energy is even
+        considered. Energy alone cannot tell a soft rock hour from a jazz one
+        that happens to sit at the same tempo -- without this, the model is
+        just handed a random slice of the whole library and has to guess at
+        genre from the mood text alone, which is exactly how a jazz or
+        Christmas track ends up in a rock hour once the library has any of
+        either in it.
         """
         cooldown_hours = float(self.cfg.get("planner.repeat_cooldown_hours", 8))
         cutoff = time.time() - cooldown_hours * 3600
         low, high = (energy_range + [1, 5])[:2]
 
-        rows = self.db.query(
-            "SELECT * FROM tracks WHERE missing=0 "
-            "AND (last_played_at IS NULL OR last_played_at < ?) "
-            "AND (energy IS NULL OR energy BETWEEN ? AND ?) "
-            "ORDER BY RANDOM() LIMIT ?",
-            (cutoff, low, high, pool_size),
-        )
+        rows: list = []
+        if genres:
+            rows = self._query_by_genre(genres, cutoff, low, high, pool_size)
+            if len(rows) < max(8, pool_size // 4):
+                # Not enough of the library is tagged anything close to this
+                # genre yet. An hour that ignores the genre beats one with
+                # only three songs in it.
+                log.info("only %d candidates match genre %s, widening past "
+                         "genre for this hour", len(rows), ", ".join(genres))
+                rows = []
+
+        if not rows:
+            rows = self.db.query(
+                "SELECT * FROM tracks WHERE missing=0 "
+                "AND (last_played_at IS NULL OR last_played_at < ?) "
+                "AND (energy IS NULL OR energy BETWEEN ? AND ?) "
+                "ORDER BY RANDOM() LIMIT ?",
+                (cutoff, low, high, pool_size),
+            )
 
         if len(rows) < max(8, pool_size // 4):
             # Small or heavily played library: relax the energy band first,
@@ -132,6 +154,36 @@ class Planner:
                 want=int(self.cfg.get("planner.focus_artist_tracks", 10)),
                 label="focus")
         return pool
+
+    def _query_by_genre(self, genres: list[str], cutoff: float, low: int,
+                        high: int, pool_size: int) -> list:
+        """Tracks whose stored genre/tags look like any of `genres`.
+
+        Substring matching against whatever Last.fm actually returned at
+        download time -- there is no controlled vocabulary here, so this is
+        deliberately loose (a genre list of "rock" matches a tag of
+        "alternative rock" or "90s rock" too) rather than trying to be exact.
+        """
+        conditions = []
+        params: list = [cutoff, low, high]
+        for genre in genres:
+            needle = str(genre).strip().lower()
+            if not needle:
+                continue
+            conditions.append(
+                "(LOWER(COALESCE(tags,'')) LIKE ? OR LOWER(COALESCE(genre,'')) LIKE ?)")
+            params.extend([f"%{needle}%", f"%{needle}%"])
+        if not conditions:
+            return []
+        params.append(pool_size)
+        return self.db.query(
+            "SELECT * FROM tracks WHERE missing=0 "
+            "AND (last_played_at IS NULL OR last_played_at < ?) "
+            "AND (energy IS NULL OR energy BETWEEN ? AND ?) "
+            f"AND ({' OR '.join(conditions)}) "
+            "ORDER BY RANDOM() LIMIT ?",
+            params,
+        )
 
     def _add_focus(self, pool: list[dict], focus_artists: list[str],
                    pool_size: int, want: int = 10,
@@ -330,7 +382,8 @@ class Planner:
                      if artist not in focus]
         candidates = self.select_candidates(
             profile.get("energy", [1, 5]), pool_size,
-            focus_artists=focus, exemplar_artists=exemplars)
+            focus_artists=focus, exemplar_artists=exemplars,
+            genres=profile.get("genres"))
         if not candidates:
             log.warning("library is empty, cannot plan a block")
             return {"items": [], "source": "empty", "mood_name": profile.get("name"),

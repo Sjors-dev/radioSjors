@@ -1764,6 +1764,85 @@ class TestHostsAndSegments(RadioTestCase):
         self.assertNotIn("high of", self.planner._weather_text({"weather": "now"}))
 
 
+class TestGenreFiltering(RadioTestCase):
+    """The reported bug: energy alone cannot tell a rock hour from a jazz
+    one at the same tempo, so the candidate pool needs to actually respect
+    a mood_map entry's genres, not just its energy band."""
+
+    def setUp(self):
+        super().setUp()
+        self.planner = Planner(self.cfg, self.db, self.library, LLM(self.cfg))
+
+    def _add_track(self, artist: str, title: str, genre: str = "",
+                   tags: str = "", energy: int = 3) -> None:
+        path = self.cfg.path("library") / f"{normalize(artist)}-{normalize(title)}.mp3"
+        make_wav(path, seconds=180.0)
+        self.db.execute(
+            "INSERT INTO tracks(path, dedupe_key, title, artist, genre, tags, "
+            "energy, duration, added_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (str(path), dedupe_key(artist, title), title, artist, genre, tags,
+             energy, 180.0, 0))
+
+    def _seed_mixed_library(self, per_genre: int = 20) -> None:
+        for n in range(per_genre):
+            self._add_track("Rock Artist", f"Rock Track {n}",
+                            genre="alternative rock", tags="rock, 90s, alternative")
+            self._add_track("Jazz Artist", f"Jazz Track {n}",
+                            genre="jazz", tags="jazz, smooth, lounge")
+
+    def test_query_by_genre_matches_loosely(self):
+        self._seed_mixed_library()
+        rows = self.planner._query_by_genre(["rock"], 0, 1, 5, 60)
+        artists = {row["artist"] for row in rows}
+        self.assertEqual(artists, {"Rock Artist"})
+
+    def test_query_by_genre_matches_several_genres_at_once(self):
+        self._seed_mixed_library()
+        self._add_track("Rap Artist", "Rap Track", genre="hip hop",
+                        tags="hip hop, rap")
+        rows = self.planner._query_by_genre(["rock", "hip hop"], 0, 1, 5, 60)
+        artists = {row["artist"] for row in rows}
+        self.assertEqual(artists, {"Rock Artist", "Rap Artist"})
+
+    def test_select_candidates_excludes_the_wrong_genre(self):
+        self._seed_mixed_library()
+        pool = self.planner.select_candidates([1, 5], 60, genres=["rock"])
+        artists = {track["artist"] for track in pool}
+        self.assertEqual(artists, {"Rock Artist"},
+                         "jazz should never have reached the pool for a rock hour")
+
+    def test_select_candidates_widens_past_genre_when_too_few_match(self):
+        # Only two rock tracks exist -- nowhere near enough for a real hour.
+        # An hour that ignores genre beats one with two songs in it.
+        self._add_track("Rock Artist", "Track 1", genre="rock", tags="rock")
+        self._add_track("Rock Artist", "Track 2", genre="rock", tags="rock")
+        for n in range(20):
+            self._add_track("Jazz Artist", f"Jazz {n}", genre="jazz", tags="jazz")
+        pool = self.planner.select_candidates([1, 5], 60, genres=["rock"])
+        artists = {track["artist"] for track in pool}
+        self.assertIn("Jazz Artist", artists,
+                      "the genre filter should have been dropped for this "
+                      "thin a match, not starved the pool")
+
+    def test_no_genres_means_unfiltered_like_before(self):
+        self._seed_mixed_library()
+        pool = self.planner.select_candidates([1, 5], 60, genres=None)
+        artists = {track["artist"] for track in pool}
+        self.assertEqual(artists, {"Rock Artist", "Jazz Artist"})
+
+    def test_plan_block_passes_the_profile_genres_through(self):
+        self._seed_mixed_library()
+        self.cfg._data["planner"] = dict(self.cfg._data["planner"])
+        self.cfg._data["planner"]["mood_map"] = [
+            {"hours": [0, 24], "name": "rock hour",
+             "mood": "rock music", "energy": [1, 5], "genres": ["rock"]},
+        ]
+        plan = self.planner.plan_block(datetime(2026, 1, 1, 14, 0))
+        artists = {item["track"]["artist"] for item in plan["items"]
+                  if item["kind"] == "song"}
+        self.assertEqual(artists, {"Rock Artist"})
+
+
 class TestBanterValidation(RadioTestCase):
     def setUp(self):
         super().setUp()
@@ -1985,6 +2064,106 @@ class TestVoiceSelection(RadioTestCase):
 
     def test_disabled_tts_has_no_speaking_hosts(self):
         self.assertEqual(TTS(self.cfg).hosts, [])
+
+    def test_hosts_can_set_their_own_expressiveness(self):
+        # The shipped config gives Nina more lift than Ray on purpose.
+        tts = TTS(self.cfg)
+        self.assertGreater(tts.voices["Nina"].noise_scale,
+                           tts.voices["Ray"].noise_scale)
+        self.assertGreater(tts.voices["Nina"].noise_w,
+                           tts.voices["Ray"].noise_w)
+
+    def test_a_blank_noise_value_falls_back_to_the_station_setting(self):
+        data = dict(BASE_CONFIG)
+        data["tts"] = dict(data["tts"], noise_scale=0.77, noise_w=0.91)
+        data["dj"] = dict(data["dj"])
+        data["dj"]["hosts"] = [
+            {"name": "Solo", "voice_model": "", "length_scale": None,
+             "noise_scale": None, "noise_w": None}]
+        tts = TTS(Config(data, self.tmp))
+        self.assertEqual(tts.voices["Solo"].noise_scale, 0.77)
+        self.assertEqual(tts.voices["Solo"].noise_w, 0.91)
+
+
+class TestExpressivenessFlags(RadioTestCase):
+    """noise_scale/noise_w (Piper's expressiveness knobs) actually reach the
+    command line, and a rejection falls back to plain audio rather than no
+    audio at all."""
+
+    def _tts_with(self, noise_scale, noise_w) -> TTS:
+        data = dict(BASE_CONFIG)
+        data["tts"] = dict(data["tts"], engine="piper_python")
+        data["dj"] = dict(data["dj"])
+        data["dj"]["hosts"] = [{
+            "name": "Solo", "voice_model": "/voices/test.onnx",
+            "length_scale": 1.0, "noise_scale": noise_scale,
+            "noise_w": noise_w,
+        }]
+        return TTS(Config(data, self.tmp))
+
+    def _run_with_fake_subprocess(self, tts: TTS, fake_run) -> Path:
+        import airadio.tts as tts_module
+        out = self.tmp / "out.wav"
+        # _run only checks that the file exists and is not tiny; it never
+        # looks at the content, so a fake is enough to stand in for a real
+        # subprocess actually writing audio.
+        out.write_bytes(b"x" * 2000)
+        original = tts_module.subprocess.run
+        tts_module.subprocess.run = fake_run
+        try:
+            return tts._synthesize("test line", out, tts.voices["Solo"])
+        finally:
+            tts_module.subprocess.run = original
+
+    def test_non_default_noise_values_reach_the_command_line(self):
+        tts = self._tts_with(0.9, 1.0)
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured["cmd"] = command
+            return _FakeCompleted(0)
+
+        self._run_with_fake_subprocess(tts, fake_run)
+        cmd = captured["cmd"]
+        self.assertIn("0.9", cmd)
+        self.assertIn("1.0", cmd)
+        self.assertTrue(any("noise_scale" in part or "noise-scale" in part
+                            for part in cmd), cmd)
+        self.assertTrue(any("noise_w" in part or "noise-w" in part
+                            for part in cmd), cmd)
+
+    def test_stock_noise_values_add_no_flags_at_all(self):
+        # Exactly Piper's own defaults -- nothing new to ask for.
+        tts = self._tts_with(0.667, 0.8)
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured["cmd"] = command
+            return _FakeCompleted(0)
+
+        self._run_with_fake_subprocess(tts, fake_run)
+        self.assertFalse(any("noise" in part for part in captured["cmd"]))
+
+    def test_a_rejected_noise_flag_falls_back_to_plain_audio(self):
+        tts = self._tts_with(0.9, 1.0)
+        attempts = []
+
+        def fake_run(command, **kwargs):
+            attempts.append(command)
+            rejected = any("noise" in part for part in command)
+            return _FakeCompleted(1 if rejected else 0)
+
+        result = self._run_with_fake_subprocess(tts, fake_run)
+        self.assertIsNotNone(result, "a rejected flag must not silence the line")
+        self.assertEqual(len(attempts), 2, "one failed attempt, one clean retry")
+        self.assertFalse(tts._noise_supported,
+                         "future lines should stop trying the flag it rejected")
+
+
+class _FakeCompleted:
+    def __init__(self, returncode: int, stderr: bytes = b""):
+        self.returncode = returncode
+        self.stderr = stderr
 
 
 class TestStitchingAudio(RadioTestCase):

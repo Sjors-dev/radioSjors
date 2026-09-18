@@ -290,7 +290,9 @@ Worth knowing about:
 | `dj.patter_every_n_tracks` | `1` for a chatty station, `3`–`4` for mostly music. |
 | `dj.segments` | How much extra talk an hour gets. Each value is a `[low, high]` range rolled fresh every hour. `[0, 0]` switches something off; `[2, 2]` pins it. |
 | `dj.max_segment_words` | The ceiling on a long item — a weather moment, a music note, a whole conversation. Raise it if you want them chattier. |
+| `dj.hosts[].noise_scale` / `noise_w` | Piper's own expressiveness knobs, per host. Higher reads more alive; push either far past ~1.0 and it starts sounding rough instead. There is a real ceiling on how expressive a small offline model gets regardless — this helps, it does not transform it. `tts-test --host Nina "line"` to hear a change without waiting for a whole hour. |
 | `weather.*` | Where the weather comes from. Change `place_name`, `latitude` and `longitude` if you move. `enabled: false` and they never mention it. |
+| `planner.mood_map[].genres` | Narrows an hour's candidates to tracks tagged anything close to these words, before energy is even considered — the reason a rock hour stops pulling in jazz or Christmas music at the same tempo. Loose substring matching, e.g. `rock` also catches `alternative rock`. Skipped automatically if too few of the library are tagged close enough yet (watch for "widening past genre" in the brain log). |
 | `planner.mood_map` | Time-of-day → mood and energy band. Hour ranges must cover 0–23. |
 | `planner.buffer_minutes` | How far ahead to work. Lower = the station reacts faster; higher = more slack when things fail. |
 | `llm.gemini_model` / `llm.groq_model` | Which model each provider uses. Both retire models regularly — the provider's own `/models` endpoint is the source of truth. |
