@@ -467,6 +467,45 @@ class TestConfig(unittest.TestCase):
             self.assertNotEqual(profile["name"], "default",
                                 f"hour {hour} is not covered by the mood map")
 
+    def test_default_genres_still_apply_after_a_local_override_replaces_mood_map(self):
+        # The actual bug: config.local.yaml sets its own planner.mood_map to
+        # customise the mood text, written before genres:/default_genres
+        # existed. Since a list overrides wholesale (see _deep_merge), any
+        # genres: living directly on the old entries would be gone with no
+        # error -- default_genres is a dict, keyed by the same slot names, so
+        # it must still apply even though this mood_map has no genres at all.
+        data = dict(BASE_CONFIG)
+        data["planner"] = dict(data["planner"])
+        data["planner"]["mood_map"] = [
+            {"hours": [0, 24], "name": "afternoon", "mood": "my own words",
+             "energy": [3, 4]},
+        ]
+        cfg = Config(data, Path("."))
+        profile = cfg.mood_for_hour(14)
+        self.assertEqual(profile["mood"], "my own words")
+        self.assertEqual(profile["genres"],
+                         BASE_CONFIG["planner"]["default_genres"]["afternoon"])
+
+    def test_an_entrys_own_genres_win_over_the_default(self):
+        data = dict(BASE_CONFIG)
+        data["planner"] = dict(data["planner"])
+        data["planner"]["mood_map"] = [
+            {"hours": [0, 24], "name": "afternoon", "mood": "x",
+             "energy": [1, 5], "genres": ["metal"]},
+        ]
+        cfg = Config(data, Path("."))
+        self.assertEqual(cfg.mood_for_hour(14)["genres"], ["metal"])
+
+    def test_an_unrecognised_slot_name_gets_no_genres_rather_than_crashing(self):
+        data = dict(BASE_CONFIG)
+        data["planner"] = dict(data["planner"])
+        data["planner"]["mood_map"] = [
+            {"hours": [0, 24], "name": "brand new slot", "mood": "x",
+             "energy": [1, 5]},
+        ]
+        cfg = Config(data, Path("."))
+        self.assertNotIn("genres", cfg.mood_for_hour(14))
+
 
 # -- downloader quality filters ---------------------------------------------
 
@@ -1248,6 +1287,15 @@ class TestFallbackPlanner(RadioTestCase):
         ids = [i["track"]["id"] for i in plan["items"] if i["kind"] == "song"]
         self.assertEqual(len(ids), len(set(ids)))
 
+    def test_show_note_names_the_actual_schedule_not_just_that_llm_is_down(self):
+        # The site showed "fallback programming (no LLM)" with no hint of
+        # what the fallback actually picked -- the mood text answers that.
+        self.seed_library(artists=8, per_artist=4)
+        plan = self.planner.plan_block(datetime(2026, 1, 1, 14, 0))
+        mood_text = self.cfg.mood_for_hour(14)["mood"].strip()
+        self.assertIn(mood_text, plan["show_note"])
+        self.assertIn("no LLM", plan["show_note"])
+
     def test_artist_spacing_is_respected(self):
         self.seed_library(artists=8, per_artist=4)
         plan = self.planner.plan_block(datetime(2026, 1, 1, 14, 0))
@@ -1841,6 +1889,25 @@ class TestGenreFiltering(RadioTestCase):
         artists = {item["track"]["artist"] for item in plan["items"]
                   if item["kind"] == "song"}
         self.assertEqual(artists, {"Rock Artist"})
+
+    def test_plan_block_recovers_genre_filtering_after_a_local_override_drops_it(self):
+        # The actual reported bug, end to end: a config.local.yaml that
+        # replaces planner.mood_map with entries carrying no genres: (because
+        # it predates that field, or only customised the mood text) used to
+        # mean every hour was an unfiltered shuffle of the whole library --
+        # exactly the rap/rock/jazz-all-in-one-block symptom reported. It
+        # must self-heal via planner.default_genres as long as the slot name
+        # ("evening") still matches the shipped one.
+        self._seed_mixed_library()
+        self.cfg._data["planner"] = dict(self.cfg._data["planner"])
+        self.cfg._data["planner"]["mood_map"] = [
+            {"hours": [0, 24], "name": "evening",
+             "mood": "my own jazzy words", "energy": [1, 5]},
+        ]
+        plan = self.planner.plan_block(datetime(2026, 1, 1, 18, 0))
+        artists = {item["track"]["artist"] for item in plan["items"]
+                  if item["kind"] == "song"}
+        self.assertEqual(artists, {"Jazz Artist"})
 
 
 class TestBanterValidation(RadioTestCase):

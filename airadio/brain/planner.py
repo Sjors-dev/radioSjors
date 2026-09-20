@@ -89,14 +89,15 @@ class Planner:
         Either way they have to reach the pool. An instruction to lean towards
         an artist is worthless if the model is only shown two of their tracks.
 
-        `genres` (from `planner.mood_map`'s own `genres:` list, if set) narrows
-        the pool to tracks tagged anything close to it before energy is even
-        considered. Energy alone cannot tell a soft rock hour from a jazz one
-        that happens to sit at the same tempo -- without this, the model is
-        just handed a random slice of the whole library and has to guess at
-        genre from the mood text alone, which is exactly how a jazz or
-        Christmas track ends up in a rock hour once the library has any of
-        either in it.
+        `genres` (from the mood profile -- an entry's own `genres:`, or
+        Config's planner.default_genres fallback by slot name, see
+        Config._with_default_genres) narrows the pool to tracks tagged
+        anything close to it before energy is even considered. Energy alone
+        cannot tell a soft rock hour from a jazz one that happens to sit at
+        the same tempo -- without this, the model is just handed a random
+        slice of the whole library and has to guess at genre from the mood
+        text alone, which is exactly how a jazz or Christmas track ends up in
+        a rock hour once the library has any of either in it.
         """
         cooldown_hours = float(self.cfg.get("planner.repeat_cooldown_hours", 8))
         cutoff = time.time() - cooldown_hours * 3600
@@ -671,9 +672,12 @@ class Planner:
 
         log.info("fallback planner built %d songs for the %s slot",
                  len(chosen), profile.get("name"))
+        mood_text = str(profile.get("mood") or "").strip()
+        note = (f"{mood_text} (fallback programming, no LLM)" if mood_text
+               else "fallback programming (no LLM)")
         return {"items": items, "source": "fallback",
                 "mood_name": profile.get("name"),
-                "show_note": "fallback programming (no LLM)"}
+                "show_note": note[:300]}
 
     # -- track enrichment ---------------------------------------------------
 

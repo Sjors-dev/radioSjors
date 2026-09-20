@@ -202,56 +202,71 @@ planner:
   # so only a few of each are added -- enough to be pickable.
   exemplar_artist_tracks: 3
   # Hour ranges are [start, end) in 24h local time and must cover 0-23.
-  # `genres:` on an entry (optional) narrows the candidate pool to tracks
-  # whose stored genre/tags contain any of the listed words BEFORE energy is
-  # even considered -- energy alone cannot tell a soft rock hour from a jazz
-  # one at the same tempo, and without this the model is just handed a
-  # random slice of the whole library and has to guess genre from the mood
-  # text alone. Loose substring matching against whatever Last.fm tagged the
-  # track with at download time, so "rock" also matches "alternative rock"
-  # or "90s rock" -- no need to list every variant. Leave it out on an entry
-  # and that hour works exactly as before (energy and mood text only). If
-  # too few tracks in the library match yet, the filter is skipped for that
-  # hour rather than starving it -- check the brain log for "widening past
-  # genre" to see when that happens; it means more of that genre needs
-  # downloading, or the words here need to match your library's actual tags
-  # (`main.py plan --dry-run` shows each candidate's tags).
   mood_map:
     - hours: [0, 5]
       name: "late night"
       mood: "slow, Atmospheric rap: just some rap music to vibe on. Nothing too hard or rage rap like"
       energy: [1, 2]
-      genres: [rap, hip hop]
     - hours: [5, 10]
       name: "morning"
       mood: "Soft Rock music. think smashing pumpkins, radiohead, and other artists like this. Nothing too hard, just some morning tunes."
       energy: [2, 3]
-      genres: [rock, alternative, indie]
     - hours: [9, 12]
       name: "late morning"
       mood: "Chill Rap to focus/study too. Think Kanye West, Kendrick lamar, Lil Yachty, and other artists like this. Music that gives you focus but still gives that morning chill."
       energy: [2, 4]
-      genres: [rap, hip hop]
     - hours: [12, 14]
       name: "midday"
       mood: "Upbeat hard rap. This should give me energy to go through to the day. Make me bop my head. Can be quite energetic "
       energy: [3, 4]
-      genres: [rap, hip hop]
     - hours: [14, 16]
       name: "afternoon"
       mood: "Upbeat hard rap. This should give me energy to go through to the day. Make me bop my head. Can be quite energetic"
       energy: [3, 4]
-      genres: [rap, hip hop]
     - hours: [16, 20]
       name: "evening"
       mood: "Jazz music to relax too. This can be quite slow viby jazz music. I want to hear this after a long day"
       energy: [2, 4]
-      genres: [jazz]
     - hours: [20, 24]
       name: "night"
       mood: "Nightly viby Rap music. Make it Atmospheric, night vibes. Can be a little energetic"
       energy: [2, 3]
-      genres: [rap, hip hop]
+
+  # Genre words per mood_map slot NAME (not per entry) -- narrows the
+  # candidate pool to tracks whose stored genre/tags contain any of the
+  # listed words BEFORE energy is even considered. Energy alone cannot tell
+  # a soft rock hour from a jazz one at the same tempo, and without this the
+  # model is just handed a random slice of the whole library and has to
+  # guess genre from the mood text alone.
+  #
+  # Keyed by name rather than living on each mood_map entry on purpose: a
+  # config.local.yaml that sets its own planner.mood_map replaces that whole
+  # list (see airadio/config.py's _deep_merge -- lists are not merged item by
+  # item), so genres written directly on an entry are silently gone the
+  # moment a machine override touches mood_map at all, with no error. This
+  # dict merges normally, so it keeps working across a local mood_map
+  # override as long as the slot names match -- which they do whenever the
+  # override only changed the mood text or energy band, the common case.
+  # An entry can still set its own `genres:` directly to override this for
+  # just that slot.
+  #
+  # Loose substring matching against whatever Last.fm tagged the track with
+  # at download time, so "rock" also matches "alternative rock" or "90s
+  # rock" -- no need to list every variant. Leave a name out and that slot
+  # works exactly as before (energy and mood text only). If too few tracks
+  # in the library match yet, the filter is skipped for that hour rather
+  # than starving it -- check the brain log for "widening past genre" to see
+  # when that happens; it means more of that genre needs downloading, or the
+  # words here need to match your library's actual tags (`main.py plan
+  # --dry-run` shows each candidate's tags).
+  default_genres:
+    "late night": [rap, hip hop]
+    "morning": [rock, alternative, indie]
+    "late morning": [rap, hip hop]
+    "midday": [rap, hip hop]
+    "afternoon": [rap, hip hop]
+    "evening": [jazz]
+    "night": [rap, hip hop]
 
 llm:
   # Failover order. First provider that answers wins; 429/5xx falls through.

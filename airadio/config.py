@@ -92,8 +92,27 @@ class Config:
         for entry in self.get("planner.mood_map", []) or []:
             start, end = entry.get("hours", [0, 24])
             if start <= hour < end:
-                return entry
+                return self._with_default_genres(entry)
         return {"name": "default", "mood": "varied and listenable", "energy": [1, 5]}
+
+    def _with_default_genres(self, entry: dict) -> dict:
+        """Fall back to planner.default_genres (keyed by slot name) when the
+        entry itself has no genres.
+
+        mood_map is a list, and a config.local.yaml that sets planner.mood_map
+        replaces the whole list rather than merging it entry by entry (see
+        _deep_merge) -- so a machine override written before genres existed,
+        or one that only customised the mood text, silently loses genre
+        filtering entirely with no error. default_genres is a dict, which
+        _deep_merge does combine key by key, so it survives that override as
+        long as the slot names still match -- which they do whenever the
+        override only changed the mood text/energy, the actual common case.
+        """
+        if entry.get("genres"):
+            return entry
+        genres = (self.get("planner.default_genres", {}) or {}).get(
+            str(entry.get("name") or ""))
+        return {**entry, "genres": genres} if genres else entry
 
 
 _cached: Config | None = None
