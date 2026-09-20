@@ -287,10 +287,11 @@ class Downloader:
         log.info("picked %r (%s, %ss, score %d) for %s - %s", best["title"],
                  best["channel"], best.get("duration"), best_score, artist, title)
 
-        path = self._download(best, artist, title)
-        if path is None:
+        downloaded = self._download(best, artist, title)
+        if downloaded is None:
             self._log_attempt(artist, title, best, "error", "download failed")
             return DownloadResult(False, reason="download failed")
+        path, normalized = downloaded
 
         tags = info.get("tags") or []
         if not tags and self.lastfm.enabled:
@@ -307,10 +308,11 @@ class Downloader:
         actual = self.library.read_tags(path)
         track_id = self.db.execute(
             "INSERT INTO tracks(path, dedupe_key, title, artist, genre, tags, "
-            "duration, source_url, added_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            "duration, source_url, added_at, loudness_normalized) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
             (str(path.resolve()), dedupe_key(artist, title), title, artist,
              (tags[0] if tags else ""), ", ".join(tags), actual.get("duration") or 0.0,
-             best.get("url"), time.time()),
+             best.get("url"), time.time(), 1 if normalized else 0),
         )
         self._log_attempt(artist, title, best, "accepted", f"score {best_score}")
         log.info("added to library: %s - %s (%s)", artist, title, path.name)
@@ -318,7 +320,8 @@ class Downloader:
         row = self.db.one("SELECT * FROM tracks WHERE id = ?", (track_id,))
         return DownloadResult(True, dict(row) if row else None, "downloaded")
 
-    def _download(self, candidate: dict, artist: str, title: str) -> Path | None:
+    def _download(self, candidate: dict, artist: str,
+                  title: str) -> tuple[Path, bool] | None:
         import yt_dlp
 
         library_dir = self.cfg.path("library")
@@ -356,6 +359,16 @@ class Downloader:
                 log.warning("yt-dlp produced no mp3 for %s - %s (is ffmpeg installed?)",
                             artist, title)
                 return None
+            source = produced[0]
+
+            # Random YouTube uploads are mastered anywhere from whisper-quiet
+            # to brickwalled, and nothing else in the pipeline ever touches
+            # loudness -- do it once here, at download time, rather than
+            # leaving every play sounding wildly uneven.
+            normalized = self.library.normalize_loudness(source, quality=quality)
+            if not normalized:
+                log.debug("added %s - %s without loudness normalisation "
+                         "(ffmpeg missing or the pass failed)", artist, title)
 
             target = library_dir / f"{safe_filename(artist)} - {safe_filename(title)}.mp3"
             counter = 1
@@ -363,8 +376,8 @@ class Downloader:
                 target = library_dir / (
                     f"{safe_filename(artist)} - {safe_filename(title)} ({counter}).mp3")
                 counter += 1
-            shutil.move(str(produced[0]), str(target))
-            return target
+            shutil.move(str(source), str(target))
+            return target, normalized
 
     def _log_attempt(self, artist: str, title: str, candidate: dict | None,
                      decision: str, reason: str) -> None:

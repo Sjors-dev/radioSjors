@@ -9,6 +9,7 @@ import json
 import shutil
 import sqlite3
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -1184,6 +1185,77 @@ class TestLibrary(RadioTestCase):
         self.seed_library(artists=2, per_artist=2)
         self.assertIsNotNone(self.library.find("artist 1 track 0"))
         self.assertIsNone(self.library.find("something that is not there"))
+
+
+class TestLoudnessNormalization(RadioTestCase):
+    """A raw YouTube rip can be mastered anywhere from whisper-quiet to
+    brickwalled, and nothing else in the pipeline ever touched loudness --
+    this is what makes one song not play twice as loud as the next."""
+
+    def _make_mp3(self, path: Path, volume_db: float = 0.0,
+                  seconds: float = 2.0) -> None:
+        subprocess.run([
+            "ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+            "-i", f"sine=frequency=440:duration={seconds}",
+            "-af", f"volume={volume_db}dB",
+            "-codec:a", "libmp3lame", "-q:a", "4", str(path),
+        ], check=True, timeout=30)
+
+    def _mean_volume_db(self, path: Path) -> float:
+        completed = subprocess.run(
+            ["ffmpeg", "-i", str(path), "-af", "volumedetect", "-f", "null", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        stderr = completed.stderr.decode("utf-8", "replace")
+        for line in stderr.splitlines():
+            if "mean_volume" in line:
+                return float(line.split(":")[1].strip().split(" ")[0])
+        self.fail(f"ffmpeg gave no mean_volume for {path.name}:\n{stderr}")
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg not installed")
+    def test_normalizes_successfully_and_keeps_the_track_playable(self):
+        path = self.cfg.path("library") / "loud.mp3"
+        self._make_mp3(path, volume_db=0.0)
+        self.assertTrue(Library.normalize_loudness(path))
+        self.assertGreater(Library.read_tags(path)["duration"], 1.5)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg not installed")
+    def test_a_quiet_and_a_loud_track_converge_to_the_same_level(self):
+        quiet = self.cfg.path("library") / "quiet.mp3"
+        loud = self.cfg.path("library") / "loud.mp3"
+        self._make_mp3(quiet, volume_db=-30.0)
+        self._make_mp3(loud, volume_db=0.0)
+        before_gap = abs(self._mean_volume_db(quiet) - self._mean_volume_db(loud))
+
+        self.assertTrue(Library.normalize_loudness(quiet))
+        self.assertTrue(Library.normalize_loudness(loud))
+        after_gap = abs(self._mean_volume_db(quiet) - self._mean_volume_db(loud))
+
+        self.assertGreater(before_gap, 20, "fixture did not start far enough apart")
+        self.assertLess(after_gap, 2,
+                        "normalised tracks should read within ~2dB of each other")
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg not installed")
+    def test_missing_ffmpeg_leaves_the_file_untouched(self):
+        import airadio.library as library_module
+        path = self.cfg.path("library") / "loud.mp3"
+        self._make_mp3(path, volume_db=0.0)
+        original = path.read_bytes()
+
+        original_which = library_module.shutil.which
+        library_module.shutil.which = lambda name: None
+        try:
+            self.assertFalse(Library.normalize_loudness(path))
+        finally:
+            library_module.shutil.which = original_which
+        self.assertEqual(path.read_bytes(), original,
+                         "a skipped pass must not touch the file at all")
+
+    def test_a_non_mp3_file_is_left_alone(self):
+        path = self.cfg.path("library") / "track.wav"
+        make_wav(path, seconds=1.0)
+        original = path.read_bytes()
+        self.assertFalse(Library.normalize_loudness(path))
+        self.assertEqual(path.read_bytes(), original)
 
 
 # -- planner ----------------------------------------------------------------
@@ -2719,6 +2791,30 @@ class TestMigrations(RadioTestCase):
         columns = {row["name"] for row in
                    self.db.query("PRAGMA table_info(queue_items)")}
         self.assertIn("host", columns)
+
+    def test_an_older_database_gains_the_loudness_normalized_column(self):
+        path = self.tmp / "state" / "old2.db"
+        connection = sqlite3.connect(path)
+        connection.executescript(
+            "CREATE TABLE tracks (id INTEGER PRIMARY KEY, path TEXT NOT NULL "
+            "UNIQUE, dedupe_key TEXT NOT NULL, content_hash TEXT, title TEXT "
+            "NOT NULL, artist TEXT NOT NULL, album TEXT, genre TEXT, tags "
+            "TEXT, mood TEXT, energy INTEGER, duration REAL, source_url "
+            "TEXT, added_at REAL NOT NULL, play_count INTEGER NOT NULL "
+            "DEFAULT 0, last_played_at REAL, missing INTEGER NOT NULL "
+            "DEFAULT 0);"
+            "INSERT INTO tracks(path, dedupe_key, title, artist, added_at) "
+            "VALUES('/x.mp3', 'a|b', 'b', 'a', 0);")
+        connection.commit()
+        connection.close()
+
+        db = Database(path)
+        db.init()
+        columns = {row["name"] for row in db.query("PRAGMA table_info(tracks)")}
+        self.assertIn("loudness_normalized", columns)
+        # An existing row backfills to 0 (not yet normalised), not NULL.
+        row = db.one("SELECT loudness_normalized FROM tracks")
+        self.assertEqual(row["loudness_normalized"], 0)
 
 
 if __name__ == "__main__":

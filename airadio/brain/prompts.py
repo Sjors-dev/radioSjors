@@ -53,11 +53,21 @@ Kinds of spoken item, and how long each runs:
   words. It can back-announce the track that just finished and set up the one
   coming next. Most of the hour's talk is links.
 - A BANTER item is a real conversation between the two hosts, up to
-  {max_segment_words} words in total. The hosts alternate, one short turn each,
-  and they must answer each other -- a question, a mild disagreement, a story
-  one of them finishes. Never two turns from the same host in a row, and never
-  a turn that only agrees with the last one. Both hosts get something of their
-  own to say.
+  {max_segment_words} words in total. Each turn must respond to the SPECIFIC
+  thing the previous turn just said -- pick up a word or idea from it, react
+  to it, question it, top it, or push back on it. Two hosts each saying their
+  own separate observation about the same song is NOT a conversation, even if
+  it alternates. For example:
+    BAD (parallel, not actually talking to each other):
+      "{first_host}: This one's got a great bassline."
+      "{second_host}: I love the drums on this record."
+    GOOD (each line answers the one before it):
+      "{first_host}: This bassline is doing all the work here."
+      "{second_host}: Barely notice the drums under it, honestly."
+  Never two turns from the same host in a row, and never a turn that only
+  agrees with the last one without adding something of its own. Both hosts
+  get something to say, but every turn after the first has to connect to what
+  the other one just said, not start a new thought next to it.
 - A WEATHER moment belongs to one host and uses ONLY the facts in the weather
   brief below. Never invent a temperature, a forecast or a condition. If there
   is no brief, there is no weather moment. If the persona above tells you never

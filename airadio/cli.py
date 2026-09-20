@@ -75,6 +75,43 @@ def cmd_scan(args, cfg: Config) -> int:
     return 0
 
 
+def cmd_normalize_library(args, cfg: Config) -> int:
+    """One-time pass to even out loudness on tracks downloaded before this
+    existed. New downloads are normalised automatically; this is the backfill."""
+    app = App(cfg)
+    quality = str(cfg.get("downloader.audio_quality", "0"))
+    rows = app.db.query(
+        "SELECT id, path FROM tracks WHERE missing=0 AND loudness_normalized=0")
+    if not rows:
+        print("every track already has normalised loudness")
+        return 0
+
+    print(f"normalising loudness on {len(rows)} tracks (one ffmpeg pass each, "
+          f"a few seconds per track on this CPU)")
+    done = missing = failed = 0
+    for index, row in enumerate(rows, 1):
+        path = Path(row["path"])
+        if not path.exists():
+            # scan() will mark it missing properly; just stop re-offering it.
+            app.db.execute("UPDATE tracks SET loudness_normalized=1 WHERE id=?",
+                           (row["id"],))
+            missing += 1
+            continue
+        if app.library.normalize_loudness(path, quality=quality):
+            app.db.execute("UPDATE tracks SET loudness_normalized=1 WHERE id=?",
+                           (row["id"],))
+            done += 1
+        else:
+            failed += 1
+        if index % 25 == 0 or index == len(rows):
+            print(f"  {index}/{len(rows)}...", flush=True)
+
+    print(f"normalised {done} tracks"
+          + (f", {failed} failed and were left as-is" if failed else "")
+          + (f", {missing} had vanished from disk" if missing else ""))
+    return 0
+
+
 def cmd_stream_config(args, cfg: Config) -> int:
     template_path = cfg.root / "stream" / "radio.liq.template"
     target = cfg.root / "stream" / "radio.generated.liq"
@@ -566,6 +603,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("init", help="create directories and the database")
     sub.add_parser("scan", help="index the library folder")
+    sub.add_parser("normalize-library",
+                   help="one-time loudness pass over tracks downloaded "
+                        "before this existed")
     sub.add_parser("stream-config", help="render stream/radio.generated.liq")
     sub.add_parser("doctor", help="check every dependency and credential")
     sub.add_parser("status", help="show what the station is doing")
@@ -624,6 +664,7 @@ def build_parser() -> argparse.ArgumentParser:
 COMMANDS = {
     "init": cmd_init,
     "scan": cmd_scan,
+    "normalize-library": cmd_normalize_library,
     "stream-config": cmd_stream_config,
     "bootstrap": cmd_bootstrap,
     "plan": cmd_plan,

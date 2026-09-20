@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     added_at      REAL    NOT NULL,
     play_count    INTEGER NOT NULL DEFAULT 0,
     last_played_at REAL,
-    missing       INTEGER NOT NULL DEFAULT 0
+    missing       INTEGER NOT NULL DEFAULT 0,
+    loudness_normalized INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_dedupe   ON tracks(dedupe_key);
 CREATE INDEX IF NOT EXISTS idx_tracks_content  ON tracks(content_hash);
@@ -130,6 +131,8 @@ CREATE TABLE IF NOT EXISTS download_log (
 # because we check the table's own schema first.
 MIGRATIONS: list[tuple[str, str, str]] = [
     ("queue_items", "host", "ALTER TABLE queue_items ADD COLUMN host TEXT"),
+    ("tracks", "loudness_normalized",
+     "ALTER TABLE tracks ADD COLUMN loudness_normalized INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

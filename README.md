@@ -127,6 +127,7 @@ one line falls straight back to Piper rather than skipping the line, and
 .venv/bin/python main.py bootstrap -h     # fill an empty library from Last.fm
 .venv/bin/python main.py plan --dry-run   # show the next hour without queueing it
 .venv/bin/python main.py scan             # re-index the music folder
+.venv/bin/python main.py normalize-library # one-time loudness pass on older downloads
 .venv/bin/python main.py download "Artist" "Title"
 .venv/bin/python main.py tts-test "line to speak"
 .venv/bin/python main.py tts-test --host Nina "let me try"
@@ -203,8 +204,9 @@ caster.fm, if you choose a paid tier there.
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-224 offline tests — no network, no ffmpeg, no liquidsoap needed. They cover
-the quality filters, de-duplication, banning, the fallback planner, artist
-spacing, queue claiming, LLM failover, the liquidsoap telnet protocol, the
-weather briefing, two-host conversation validation and rendering, the schema
-migration, the edge-tts/piper fallback, and what the website gets told.
+235 offline tests — no network, no liquidsoap needed, and only a handful want
+ffmpeg (skipped automatically if it's missing). They cover the quality
+filters, de-duplication, banning, the fallback planner, artist spacing, queue
+claiming, LLM failover, the liquidsoap telnet protocol, the weather briefing,
+two-host conversation validation and rendering, the schema migration, the
+edge-tts/piper fallback, loudness normalisation, and what the website gets told.

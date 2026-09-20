@@ -302,6 +302,8 @@ Worth knowing about:
 | `dj.patter_every_n_tracks` | `1` for a chatty station, `3`–`4` for mostly music. |
 | `dj.segments` | How much extra talk an hour gets. Each value is a `[low, high]` range rolled fresh every hour. `[0, 0]` switches something off; `[2, 2]` pins it. |
 | `dj.max_segment_words` | The ceiling on a long item — a weather moment, a music note, a whole conversation. Raise it if you want them chattier. |
+| `dj.max_patter_words` | The ceiling on an ordinary link (back-announce/next-up), separate from `max_segment_words` above. Raise it if the short links between songs feel clipped. |
+| `dj.turn_gap_seconds` | Silence inserted between one host finishing and the other starting in a conversation. Too low and two different voices run together like one person; too high reads as dead air instead of a real back-and-forth — tune by ear with `tts-test --duet "Line one|Line two"`. |
 | `dj.hosts[].noise_scale` / `noise_w` | Piper's own expressiveness knobs, per host. Higher reads more alive; push either far past ~1.0 and it starts sounding rough instead. There is a real ceiling on how expressive a small offline model gets regardless — this helps, it does not transform it. `tts-test --host Nina "line"` to hear a change without waiting for a whole hour. |
 | `tts.engine: edge_tts` + `tts.edge_voice` / `dj.hosts[].edge_voice` | Swap Piper for Microsoft Edge's free neural voices — real prosody, still no bill. Unofficial endpoint, so `voice_model` stays set on every host as the automatic per-line fallback if edge-tts is offline or blocked; `doctor` says which one is actually in use. |
 | `weather.*` | Where the weather comes from. Change `place_name`, `latitude` and `longitude` if you move. `enabled: false` and they never mention it. |
@@ -316,6 +318,18 @@ Worth knowing about:
 | `stream.liquidsoap_queue_depth` | How many items sit inside liquidsoap. Lower = mood shifts apply sooner; higher = more slack if the brain stalls. |
 | `bot.min_tracks_for_request` | Naming an artist in chat (a request or a mood) tops the library up to this many of their tracks on the spot if it's short. `0` disables the on-demand fetch entirely. |
 | `bot.backfill_budget_seconds` | Ceiling on how long that on-demand fetch is allowed to run before giving up with whatever it got. It runs inside the chat reply, so keep this well under a few minutes. |
+
+New downloads have their loudness evened out automatically (a raw YouTube rip
+can be mastered anywhere from whisper-quiet to brickwalled). Tracks already in
+the library from before this existed are untouched until you run the one-time
+backfill:
+
+```bash
+.venv/bin/python main.py normalize-library
+```
+
+Safe to interrupt and re-run — it only processes tracks it hasn't already
+normalised, one ffmpeg pass each.
 
 ---
 

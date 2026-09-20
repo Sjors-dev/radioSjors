@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -18,6 +19,10 @@ from .util import dedupe_key, normalize, quick_hash
 log = logging.getLogger("library")
 
 AUDIO_SUFFIXES = {".mp3", ".m4a", ".ogg", ".opus", ".flac", ".wav"}
+
+# Same target as the patter's own loudnorm pass in tts.py's _postprocess, so
+# talk and music sit level with each other too, not just song to song.
+LOUDNESS_FILTER = "loudnorm=I=-16:TP=-1.5:LRA=11"
 
 # Custom free-text tags we own.  Stored in ID3 TXXX frames via EasyID3.
 for _key in ("mood", "energy", "airadio_tags"):
@@ -105,6 +110,51 @@ class Library:
             audio.save()
         except Exception as exc:
             log.warning("could not tag %s: %s", path.name, exc)
+
+    @staticmethod
+    def normalize_loudness(path: Path, quality: str = "0") -> bool:
+        """Even out mastering loudness so one track does not play twice as
+        loud as the next -- a raw YouTube rip can be mastered anywhere from
+        whisper-quiet to brickwalled, and nothing upstream of this ever
+        touched that. Same -16 LUFS target as patter's own loudnorm pass in
+        tts.py, so talk and music sit level with each other too.
+
+        `quality` is libmp3lame's -q:a scale (0 best, 9 worst) -- pass
+        downloader.audio_quality so a re-encode does not throw away
+        resolution the original download deliberately kept.
+
+        Rewrites the file in place via a temp file and an atomic replace, so
+        a failed or interrupted pass never leaves a corrupt or missing file.
+        Returns False (file left untouched) if ffmpeg is missing or the pass
+        fails -- a too-loud track beats no track at all.
+        """
+        if path.suffix.lower() != ".mp3":
+            return False
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return False
+
+        tmp = path.with_name(f".{path.stem}.normalizing.mp3")
+        command = [ffmpeg, "-y", "-loglevel", "error", "-i", str(path),
+                  "-af", LOUDNESS_FILTER, "-c:a", "libmp3lame", "-q:a",
+                  str(quality), str(tmp)]
+        try:
+            completed = subprocess.run(command, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, timeout=180)
+        except Exception as exc:
+            log.warning("loudness normalisation failed for %s: %s", path.name, exc)
+            tmp.unlink(missing_ok=True)
+            return False
+        if (completed.returncode != 0 or not tmp.exists()
+                or tmp.stat().st_size < 1000):
+            log.warning("loudness normalisation produced nothing usable for "
+                        "%s: %s", path.name,
+                        completed.stderr.decode("utf-8", "replace")[:200])
+            tmp.unlink(missing_ok=True)
+            return False
+
+        tmp.replace(path)
+        return True
 
     # -- scanning -----------------------------------------------------------
 
