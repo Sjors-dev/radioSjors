@@ -204,7 +204,7 @@ caster.fm, if you choose a paid tier there.
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-235 offline tests — no network, no liquidsoap needed, and only a handful want
+240 offline tests — no network, no liquidsoap needed, and only a handful want
 ffmpeg (skipped automatically if it's missing). They cover the quality
 filters, de-duplication, banning, the fallback planner, artist spacing, queue
 claiming, LLM failover, the liquidsoap telnet protocol, the weather briefing,

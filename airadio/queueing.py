@@ -268,11 +268,27 @@ class QueueManager:
         return [dict(row) for row in rows]
 
     def clear_pending(self, tier: str | None = None) -> int:
-        """Drop not-yet-played items, e.g. after an immediate re-plan."""
+        """Drop not-yet-played items, e.g. after an immediate re-plan.
+
+        Both 'ready' and 'pending' are dropped. Leaving 'pending' behind was
+        a real bug: an unrendered patter line from the plan being replaced
+        keeps whatever seq it was built with, which sits lower than anything
+        the fresh plan builds -- and take_next() correctly refuses to skip
+        past a pending item to reach a ready one behind it (see
+        test_take_next_waits_for_an_unrendered_line). The result was the
+        whole tier stalling behind stale patter from a mood that no longer
+        applies, for as long as it took that one line to finally render.
+        'pushed' items are left alone: they are already inside liquidsoap's
+        own queue and cannot be un-pushed, so a track or two already handed
+        off still plays out -- that is the "takes a track or two" a mood
+        shift promises.
+        """
         if tier:
             return self.db.execute(
-                "DELETE FROM queue_items WHERE status='ready' AND tier=?", (tier,))
-        return self.db.execute("DELETE FROM queue_items WHERE status='ready'")
+                "DELETE FROM queue_items WHERE status IN ('ready','pending') "
+                "AND tier=?", (tier,))
+        return self.db.execute(
+            "DELETE FROM queue_items WHERE status IN ('ready','pending')")
 
     def prune_history(self, keep: int = 500) -> int:
         """Keep the table small; played items are only kept for the log."""

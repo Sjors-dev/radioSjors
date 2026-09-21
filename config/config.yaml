@@ -289,6 +289,11 @@ llm:
     tag: 6000        # mood/energy labelling of new tracks
     intent: 2048     # classifying one chat message
     probe: 2048      # the liveness check in `main.py doctor`
+  # Off by default -- a full plan prompt runs to a few KB, every hour. Turn
+  # on temporarily to see exactly what was asked for and what the model wrote
+  # back, e.g. to check a conversation against the prompt that produced it:
+  #   journalctl -u ai-radio-brain | grep -A50 "LLM request (plan)"
+  log_prompts: false
 
 discovery:
   # Seeds used to bootstrap an empty library and to keep it growing.

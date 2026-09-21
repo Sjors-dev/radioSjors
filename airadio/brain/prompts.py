@@ -28,10 +28,15 @@ Rules you must not break:
 - The synthetic voice takes its cue from punctuation more than from the words
   themselves. A line that should sound genuinely excited needs an exclamation
   mark, not just enthusiastic-sounding words with a full stop -- the words
-  alone read flat. Match punctuation to how each host actually talks: more
-  exclamation marks and short, quick sentences for someone animated, plainer
-  full stops for someone dry and unhurried. Use this for real, not on every
-  line -- a host who is excited about everything stops sounding like anyone.
+  alone read flat regardless of how good they are. For example:
+    READS FLAT NO MATTER WHAT (a full stop, however strong the words):
+      "This song is incredible."
+    ACTUALLY LANDS EXCITED (the mark is doing the work, not the adjective):
+      "Oh, this one's incredible!"
+  Match punctuation to how each host actually talks: more exclamation marks
+  and short, quick sentences for someone animated, plainer full stops for
+  someone dry and unhurried. Use this for real, not on every line -- a host
+  who is excited about everything stops sounding like anyone.
 - Do not play the same artist again within {artist_spacing} songs. No back-to-back
   pairs from one artist, no "two in a row" sets. Spread each artist out across
   the hour. If the candidate list is too small to manage that, get as close as

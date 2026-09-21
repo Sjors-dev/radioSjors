@@ -542,7 +542,8 @@ def cmd_doctor(args, cfg: Config) -> int:
         try:
             answer = app.llm.complete(
                 "Answer with exactly one word.", "Say the word: ready",
-                temperature=0.0, max_tokens=app.llm.budget("probe"))
+                temperature=0.0, max_tokens=app.llm.budget("probe"),
+                label="probe")
             report("OK", "llm call", f"answered {answer.strip()[:40]!r}")
         except LLMUnavailable as exc:
             report("FAIL", "llm call", str(exc)[:200])

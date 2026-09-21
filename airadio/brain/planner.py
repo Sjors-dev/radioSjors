@@ -467,7 +467,8 @@ class Planner:
         )
 
         data = self.llm.complete_json(system, user, temperature=0.85,
-                                      max_tokens=self.llm.budget("plan"))
+                                      max_tokens=self.llm.budget("plan"),
+                                      label="plan")
         items = self._validate(data.get("items") or [], candidates, track_count,
                                names)
 
@@ -672,12 +673,32 @@ class Planner:
 
         log.info("fallback planner built %d songs for the %s slot",
                  len(chosen), profile.get("name"))
-        mood_text = str(profile.get("mood") or "").strip()
-        note = (f"{mood_text} (fallback programming, no LLM)" if mood_text
-               else "fallback programming (no LLM)")
+        note = self._fallback_show_note(profile)
         return {"items": items, "source": "fallback",
                 "mood_name": profile.get("name"),
                 "show_note": note[:300]}
+
+    def _fallback_show_note(self, profile: dict) -> str:
+        """What "This hour" should say when there is no LLM to write one.
+
+        A standing mood the listener set with !mood is only ever partly
+        honoured here -- select_candidates() still filters by the TIME-OF-DAY
+        profile's own energy/genres, and the only thing free text can do
+        without an LLM to interpret it is surface any library artist named
+        in it (see artists_named_in/focus_artists). Saying just the slot's
+        own mood text while a standing override is active looked like the
+        request had been silently dropped; this says plainly that it hasn't
+        fully taken effect rather than leaving that to be inferred.
+        """
+        mood_text = str(profile.get("mood") or "").strip()
+        override = self.current_mood().strip()
+        base = f"{mood_text} (fallback programming, no LLM)" if mood_text \
+            else "fallback programming (no LLM)"
+        if not override:
+            return base
+        return (f"Still playing the {profile.get('name')} slot's own "
+               f"rotation -- \"{override}\" needs the LLM to fully apply "
+               f"beyond artists named in it. {base}")
 
     # -- track enrichment ---------------------------------------------------
 
@@ -702,7 +723,8 @@ class Planner:
             data = self.llm.complete_json(TAGGER_SYSTEM,
                                           TAGGER_USER.format(tracks=listing),
                                           temperature=0.2,
-                                          max_tokens=self.llm.budget("tag"))
+                                          max_tokens=self.llm.budget("tag"),
+                                          label="tag")
         except LLMUnavailable as exc:
             log.info("track enrichment skipped: %s", exc)
             return 0

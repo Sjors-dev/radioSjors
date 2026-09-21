@@ -266,6 +266,30 @@ class TestLLMFailover(unittest.TestCase):
         os.environ.pop("GROQ_API_KEY", None)
         self.assertFalse(LLM(Config(BASE_CONFIG, Path("."))).enabled)
 
+    def test_log_prompts_off_by_default_and_silent(self):
+        self.assertFalse(self.llm.log_prompts)
+        self.llm._session.post = self._responder(
+            FakeResponse(200, GEMINI_OK), FakeResponse(200, GROQ_OK))
+        with self.assertNoLogs("llm", level="INFO"):
+            self.llm.complete("system text", "user text", label="plan")
+
+    def test_log_prompts_captures_request_and_response_when_enabled(self):
+        data = dict(BASE_CONFIG)
+        data["llm"] = dict(data["llm"], max_retries=0, log_prompts=True)
+        llm = LLM(Config(data, Path(".")))
+        llm._session.post = self._responder(
+            FakeResponse(200, GEMINI_OK), FakeResponse(200, GROQ_OK))
+
+        with self.assertLogs("llm", level="INFO") as captured:
+            llm.complete("a specific system prompt", "a specific user prompt",
+                        label="plan")
+
+        combined = "\n".join(captured.output)
+        self.assertIn("(plan)", combined)
+        self.assertIn("a specific system prompt", combined)
+        self.assertIn("a specific user prompt", combined)
+        self.assertIn("from gemini", combined)
+
 
 class TestMetadataParsing(unittest.TestCase):
     def test_parses_the_newest_block_which_is_the_last(self):
@@ -1368,6 +1392,22 @@ class TestFallbackPlanner(RadioTestCase):
         self.assertIn(mood_text, plan["show_note"])
         self.assertIn("no LLM", plan["show_note"])
 
+    def test_show_note_admits_a_standing_mood_cannot_fully_apply_without_llm(self):
+        # The actual reported bug: Discord confirmed a mood shift, but the
+        # site kept showing the plain time-of-day text with no sign the
+        # request had been seen at all -- select_candidates() still filters
+        # by the time-of-day profile in fallback mode, so a free-text mood
+        # genuinely cannot fully apply without the LLM to interpret it. This
+        # says so, instead of looking like the request was silently dropped.
+        self.seed_library(artists=8, per_artist=4)
+        self.planner.set_mood("classic jazzy background, avoid jazz rap")
+        plan = self.planner.plan_block(datetime(2026, 1, 1, 14, 0))
+        self.assertIn("classic jazzy background, avoid jazz rap", plan["show_note"])
+        self.assertIn("LLM", plan["show_note"])
+        mood_text = self.cfg.mood_for_hour(14)["mood"].strip()
+        self.assertIn(mood_text, plan["show_note"],
+                      "the slot's own schedule should still be named for context")
+
     def test_artist_spacing_is_respected(self):
         self.seed_library(artists=8, per_artist=4)
         plan = self.planner.plan_block(datetime(2026, 1, 1, 14, 0))
@@ -1735,6 +1775,30 @@ class TestQueue(RadioTestCase):
             "SELECT COUNT(*) AS n FROM queue_items WHERE status='pushed'")["n"]
         self.assertEqual(after, 2)
         self.assertLess(after, before)
+
+    def test_clear_pending_also_drops_unrendered_patter(self):
+        # The actual reported bug: a mood shift's "takes a track or two"
+        # promise assumed clear_pending actually cleared the old plan, but an
+        # unrendered patter line (status='pending') survived it, still
+        # sitting at whatever seq the OLD plan gave it.
+        self.build_raw()
+        self.assertGreater(self.queue.pending_count(), 0,
+                           "need an unrendered line still pending for this test")
+        self.queue.clear_pending("ai")
+        self.assertEqual(self.queue.pending_count(), 0)
+
+    def test_a_stale_pending_line_no_longer_blocks_a_fresh_plan(self):
+        # With the old plan's pending patter left behind, its lower seq
+        # sorted before the fresh plan's own items, and take_next correctly
+        # refuses to skip past a pending item -- so the whole tier stalled
+        # behind a mood that had already moved on.
+        self.build_raw()
+        self.assertGreater(self.queue.pending_count(), 0)
+        self.queue.clear_pending("ai")
+        self.build()
+        self.assertGreater(len(self.queue.take_next("ai", limit=3)), 0,
+                           "a fresh plan must not stall behind a cleared "
+                           "mood's leftover pending patter")
 
 
 # -- weather ----------------------------------------------------------------

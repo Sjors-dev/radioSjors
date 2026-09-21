@@ -62,6 +62,12 @@ class LLM:
             except (TypeError, ValueError):
                 log.warning("ignoring non-numeric llm.max_tokens.%s: %r", name, value)
 
+        # Off by default -- a full plan prompt runs to a few KB, every hour.
+        # Turn on to see exactly what was asked for and what came back, e.g.
+        # to compare a written conversation against the prompt that produced
+        # it: journalctl -u ai-radio-brain | grep -A50 "LLM request (plan)"
+        self.log_prompts = bool(cfg.get("llm.log_prompts", False))
+
     def budget(self, job: str) -> int:
         """Completion token budget for a named job."""
         return int(self._budgets.get(job, 4096))
@@ -86,10 +92,16 @@ class LLM:
     # -- public API ---------------------------------------------------------
 
     def complete(self, system: str, user: str, json_mode: bool = False,
-                 temperature: float = 0.8, max_tokens: int = 4096) -> str:
+                 temperature: float = 0.8, max_tokens: int = 4096,
+                 label: str = "") -> str:
         """Ask the first working provider. Raises LLMUnavailable if all fail."""
         now = time.time()
         errors: list[str] = []
+        tag = f" ({label})" if label else ""
+
+        if self.log_prompts:
+            log.info("LLM request%s:\n--- system ---\n%s\n--- user ---\n%s",
+                     tag, system, user)
 
         for provider in self.providers:
             key = self._key(provider)
@@ -115,6 +127,9 @@ class LLM:
 
                     if text:
                         log.debug("%s answered (%d chars)", provider, len(text))
+                        if self.log_prompts:
+                            log.info("LLM response%s (%s, %d chars):\n%s",
+                                    tag, provider, len(text), text)
                         return text
                     errors.append(f"{provider}: empty response")
                     break
@@ -138,10 +153,10 @@ class LLM:
         raise LLMUnavailable("; ".join(errors) or "no providers configured")
 
     def complete_json(self, system: str, user: str, temperature: float = 0.8,
-                      max_tokens: int = 4096) -> dict:
+                      max_tokens: int = 4096, label: str = "") -> dict:
         """Same as complete(), but insists on a JSON object coming back."""
-        raw = self.complete(system, user, json_mode=True,
-                            temperature=temperature, max_tokens=max_tokens)
+        raw = self.complete(system, user, json_mode=True, temperature=temperature,
+                            max_tokens=max_tokens, label=label)
         parsed = extract_json(raw)
         if parsed is None:
             raise LLMUnavailable(f"response was not JSON: {raw[:200]!r}")
