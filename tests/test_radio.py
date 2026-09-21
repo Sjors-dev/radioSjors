@@ -2053,11 +2053,12 @@ class TestBanterValidation(RadioTestCase):
         self.seed_library(artists=8, per_artist=4)
         self.candidates = self.planner.select_candidates([1, 5], 40)
 
-    def _validate(self, extra, names=("Ray", "Nina")):
+    def _validate(self, extra, names=("Ray", "Nina"), max_banter_turns=None):
         raw = ([{"type": "song", "id": t["id"]} for t in self.candidates[:6]]
                + extra
                + [{"type": "song", "id": self.candidates[6]["id"]}])
-        return self.planner._validate(raw, self.candidates, 6, list(names))
+        return self.planner._validate(raw, self.candidates, 6, list(names),
+                                      max_banter_turns=max_banter_turns)
 
     def test_a_conversation_survives_validation(self):
         items = self._validate([{"type": "banter", "lines": [
@@ -2068,6 +2069,24 @@ class TestBanterValidation(RadioTestCase):
         self.assertEqual(len(banter), 1)
         self.assertEqual([turn["host"] for turn in banter[0]["lines"]],
                          ["Ray", "Nina", "Ray"])
+
+    def test_a_conversation_running_over_the_requested_turns_is_trimmed(self):
+        # The reported bug: banter_turns rolled 4-6 for the hour, the model
+        # wrote 10 anyway, and the back half drifted off-topic into weather
+        # chat. Nothing enforced the count the prompt actually asked for.
+        lines = [{"host": ["Ray", "Nina"][i % 2], "text": f"Turn number {i}."}
+                 for i in range(10)]
+        items = self._validate([{"type": "banter", "lines": lines}],
+                               max_banter_turns=6)
+        banter = [i for i in items if i["kind"] == "banter"][0]
+        self.assertLessEqual(len(banter["lines"]), 6)
+
+    def test_no_turn_limit_means_unbounded_like_before(self):
+        lines = [{"host": ["Ray", "Nina"][i % 2], "text": f"Turn number {i}."}
+                 for i in range(10)]
+        items = self._validate([{"type": "banter", "lines": lines}])
+        banter = [i for i in items if i["kind"] == "banter"][0]
+        self.assertEqual(len(banter["lines"]), 10)
 
     def test_two_turns_from_one_host_are_merged_not_dropped(self):
         turns = _clean_exchange([

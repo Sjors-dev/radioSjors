@@ -72,7 +72,12 @@ Kinds of spoken item, and how long each runs:
   Never two turns from the same host in a row, and never a turn that only
   agrees with the last one without adding something of its own. Both hosts
   get something to say, but every turn after the first has to connect to what
-  the other one just said, not start a new thought next to it.
+  the other one just said, not start a new thought next to it. Stay on the
+  one thing the conversation started about all the way through -- do not
+  let it drift into weather, or into a vague "let's keep the mood going"
+  sign-off; if it runs out of things to say about the record, end it a turn
+  earlier instead of padding. Weather gets its own separate moment when the
+  plan below asks for one; never lead a conversation toward it.
 - A WEATHER moment belongs to one host and uses ONLY the facts in the weather
   brief below. Never invent a temperature, a forecast or a condition. If there
   is no brief, there is no weather moment. If the persona above tells you never

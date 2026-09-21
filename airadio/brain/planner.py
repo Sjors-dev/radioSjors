@@ -470,7 +470,7 @@ class Planner:
                                       max_tokens=self.llm.budget("plan"),
                                       label="plan")
         items = self._validate(data.get("items") or [], candidates, track_count,
-                               names)
+                               names, max_banter_turns=brief["banter_turns"] + 2)
 
         return {
             "items": items,
@@ -490,7 +490,8 @@ class Planner:
         return self.weather.briefing(include_outlook=brief["weather"] == "outlook")
 
     def _validate(self, raw_items: list, candidates: list[dict],
-                  track_count: int, names: list[str] | None = None) -> list[dict]:
+                  track_count: int, names: list[str] | None = None,
+                  max_banter_turns: int | None = None) -> list[dict]:
         """Trust nothing: drop invented ids, repeats and malformed entries."""
         by_id = {track["id"]: track for track in candidates}
         max_segment_words = int(self.cfg.get("dj.max_segment_words", 90))
@@ -532,7 +533,8 @@ class Planner:
 
             elif kind in ("banter", "conversation", "exchange"):
                 lines = _clean_exchange(raw.get("lines"), names,
-                                        max_segment_words)
+                                        max_segment_words,
+                                        max_turns=max_banter_turns)
                 if len(lines) >= 2:
                     items.append({"kind": "banter", "lines": lines})
                 elif lines:
@@ -975,10 +977,19 @@ def _pick_host(raw, names: list[str], index: int = 0) -> str:
     return names[index % len(names)]
 
 
-def _clean_exchange(raw_lines, names: list[str], max_words: int) -> list[dict]:
-    """Turn the model's "lines" array into an alternating, speakable script."""
+def _clean_exchange(raw_lines, names: list[str], max_words: int,
+                    max_turns: int | None = None) -> list[dict]:
+    """Turn the model's "lines" array into an alternating, speakable script.
+
+    `max_turns` is a backstop, not the target -- the prompt already asks for
+    a specific turn count, but nothing stopped the model writing twice that
+    many, and a conversation left to run long is also a conversation left to
+    drift off whatever it started about.
+    """
     if not isinstance(raw_lines, list):
         return []
+    if max_turns is not None:
+        raw_lines = raw_lines[:max_turns]
     per_turn = max(12, max_words // 3)
 
     turns: list[dict] = []
