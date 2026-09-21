@@ -377,14 +377,24 @@ class Planner:
 
         # The listener asking right now outranks the time-of-day profile, so
         # an artist named in both is treated as focus, not as an exemplar.
-        focus = self.artists_named_in(self.current_mood())
+        mood_override = self.current_mood()
+        focus = self.artists_named_in(mood_override)
         exemplars = [artist for artist in
                      self.artists_named_in(profile.get("mood", ""))
                      if artist not in focus]
+        # A standing mood locks the candidate pool to the time-of-day genre
+        # otherwise -- "upbeat hard rap" during a jazz hour used to hand the
+        # LLM 51 jazz tracks and ask it to sound excited about rap, which it
+        # obviously cannot do with nothing but jazz on offer, and the
+        # fallback planner (no free-text understanding at all) fared even
+        # worse. An explicit override means the listener wants something
+        # other than the default for this hour, so the genre lock -- which
+        # exists to serve that default -- gets out of the way; named artists
+        # and the mood text in the prompt still steer it.
         candidates = self.select_candidates(
             profile.get("energy", [1, 5]), pool_size,
             focus_artists=focus, exemplar_artists=exemplars,
-            genres=profile.get("genres"))
+            genres=(profile.get("genres") if not mood_override else None))
         if not candidates:
             log.warning("library is empty, cannot plan a block")
             return {"items": [], "source": "empty", "mood_name": profile.get("name"),

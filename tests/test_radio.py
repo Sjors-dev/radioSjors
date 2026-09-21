@@ -2045,6 +2045,28 @@ class TestGenreFiltering(RadioTestCase):
                   if item["kind"] == "song"}
         self.assertEqual(artists, {"Jazz Artist"})
 
+    def test_a_standing_mood_opens_up_the_whole_library_not_just_the_slot_genre(self):
+        # The actual reported bug: it was evening (jazz hour, genre-locked to
+        # jazz), the listener asked for "upbeat hard rap" via !mood, and the
+        # LLM got handed 51 jazz tracks with instructions to sound excited
+        # about rap -- it obviously could not, because select_candidates()
+        # locked the pool to the jazz genre regardless of the override. An
+        # explicit standing mood means the listener wants something other
+        # than the default, so the genre lock should get out of the way.
+        self._seed_mixed_library()
+        self.planner.set_mood("upbeat hard rap, high energy")
+        self.cfg._data["planner"] = dict(self.cfg._data["planner"])
+        self.cfg._data["planner"]["mood_map"] = [
+            {"hours": [0, 24], "name": "evening", "mood": "jazz music",
+             "energy": [1, 5], "genres": ["jazz"]},
+        ]
+        plan = self.planner.plan_block(datetime(2026, 1, 1, 18, 0))
+        artists = {item["track"]["artist"] for item in plan["items"]
+                  if item["kind"] == "song"}
+        self.assertIn("Rock Artist", artists,
+                      "a standing mood override must not stay locked to the "
+                      "time-of-day genre")
+
 
 class TestBanterValidation(RadioTestCase):
     def setUp(self):
