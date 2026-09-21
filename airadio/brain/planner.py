@@ -20,6 +20,7 @@ from pathlib import Path
 from ..config import Config
 from ..db import Database
 from ..library import Library
+from ..news import News
 from ..util import human_duration, normalize
 from ..weather import Weather
 from .llm import LLM, LLMUnavailable
@@ -30,12 +31,13 @@ log = logging.getLogger("planner")
 
 class Planner:
     def __init__(self, cfg: Config, db: Database, library: Library, llm: LLM,
-                 weather: Weather | None = None):
+                 weather: Weather | None = None, news: News | None = None):
         self.cfg = cfg
         self.db = db
         self.library = library
         self.llm = llm
         self.weather = weather
+        self.news = news
 
     # -- mood ---------------------------------------------------------------
 
@@ -286,7 +288,7 @@ class Planner:
         return "\n".join(lines)
 
     def segment_brief(self, airtime: datetime, names: list[str],
-                      has_weather: bool) -> dict:
+                      has_weather: bool, has_news: bool = False) -> dict:
         """Decide how much the hosts talk this hour, and about what.
 
         Rolled per block rather than fixed, because "talks more, but only
@@ -314,8 +316,11 @@ class Planner:
             # The whole-day forecast is only useful before the day happens.
             weather = "outlook" if start <= airtime.hour < end else "now"
 
+        news = has_news and random.random() < float(
+            segments.get("news_chance", 0.4))
+
         return {"banter": banter, "banter_turns": turns,
-                "music_notes": notes, "weather": weather}
+                "music_notes": notes, "weather": weather, "news": news}
 
     def _segment_plan_text(self, brief: dict, names: list[str]) -> str:
         wants = []
@@ -339,6 +344,13 @@ class Planner:
             wants.append("- Include exactly one weather moment, using the "
                          "brief below. Just the conditions outside right now, "
                          "in a sentence or two. Do not read out a forecast.")
+        if brief.get("news"):
+            wants.append("- Include exactly one news moment, using the "
+                         "headlines below. Pick one or two that actually fit "
+                         "this station, say them in your own natural spoken "
+                         "words rather than reading a headline verbatim, and "
+                         "never add a fact, number or opinion a headline does "
+                         "not already contain.")
 
         if not wants:
             return ("This hour is a quiet one: every spoken item is a short "
@@ -405,10 +417,12 @@ class Planner:
 
         names = self.host_names(speaking_hosts)
         briefing = self.weather.briefing() if self.weather else ""
-        brief = self.segment_brief(airtime, names, bool(briefing))
-        log.info("hour brief: hosts=%s, banter=%d, music notes=%d, weather=%s",
-                 "/".join(names), brief["banter"], brief["music_notes"],
-                 brief["weather"] or "none")
+        has_news = bool(self.news and self.news.headlines())
+        brief = self.segment_brief(airtime, names, bool(briefing), has_news)
+        log.info("hour brief: hosts=%s, banter=%d, music notes=%d, weather=%s, "
+                 "news=%s", "/".join(names), brief["banter"],
+                 brief["music_notes"], brief["weather"] or "none",
+                 "yes" if brief.get("news") else "no")
 
         if self.llm.enabled and self.library.count() >= min_tracks:
             try:
@@ -468,6 +482,9 @@ class Planner:
             weather_brief=(f"Weather brief (facts only, use nothing else):\n"
                            f"{self._weather_text(brief)}\n"
                            if brief["weather"] else ""),
+            news_brief=(f"News brief (facts only, use nothing else):\n"
+                       f"{self._news_text(brief)}\n"
+                       if brief.get("news") else ""),
             track_count=track_count,
             patter_every=patter_every,
             patter_plural="" if patter_every == 1 else "s",
@@ -498,6 +515,16 @@ class Planner:
         if not self.weather or not brief.get("weather"):
             return ""
         return self.weather.briefing(include_outlook=brief["weather"] == "outlook")
+
+    def _news_text(self, brief: dict) -> str:
+        """The facts for this hour's news moment, or nothing at all.
+
+        Same reasoning as _weather_text: an hour with no news slot must not
+        be handed headlines, or every hour ends up mentioning the news.
+        """
+        if not self.news or not brief.get("news"):
+            return ""
+        return self.news.briefing()
 
     def _validate(self, raw_items: list, candidates: list[dict],
                   track_count: int, names: list[str] | None = None,
@@ -532,10 +559,10 @@ class Planner:
                 used.add(track_id)
                 items.append({"kind": "song", "track": track})
 
-            elif kind in ("patter", "link", "weather", "note"):
+            elif kind in ("patter", "link", "weather", "note", "news"):
                 # The generous cap is the runaway guard, not the target; the
-                # prompt asks for links under max_words and only lets weather
-                # and music notes run longer.
+                # prompt asks for links under max_words and only lets weather,
+                # news and music notes run longer.
                 text = _clean_patter(str(raw.get("text") or ""), max_segment_words)
                 if text:
                     items.append({"kind": "patter", "text": text,
@@ -604,7 +631,7 @@ class Planner:
         focus = {artist.lower() for artist in (focus_artists or [])}
         names = names or self.host_names()
         brief = brief or {"banter": 0, "banter_turns": 4, "music_notes": 0,
-                          "weather": ""}
+                          "weather": "", "news": False}
 
         pool = list(candidates)
         random.shuffle(pool)
@@ -652,8 +679,12 @@ class Planner:
                  if patter_every > 0 and index % patter_every == 0]
         random.shuffle(slots)
         banter_at = set(slots[:brief["banter"]] if len(names) > 1 else [])
-        weather_at = (slots[len(banter_at)] if brief["weather"] and
-                      len(slots) > len(banter_at) else None)
+        claimed = len(banter_at)
+        weather_at = (slots[claimed] if brief["weather"] and
+                      len(slots) > claimed else None)
+        claimed += 1 if weather_at is not None else 0
+        news_at = (slots[claimed] if brief.get("news") and
+                  len(slots) > claimed else None)
 
         items: list[dict] = []
         if opening:
@@ -671,6 +702,10 @@ class Planner:
                     text = _template_weather(
                         self.weather.current(),
                         outlook=brief["weather"] == "outlook")
+                    items.append({"kind": "patter", "host": names[0],
+                                  "text": text or _template_link(previous, track)})
+                elif index == news_at and self.news:
+                    text = _template_news(self.news.headlines())
                     items.append({"kind": "patter", "host": names[0],
                                   "text": text or _template_link(previous, track)})
                 else:
@@ -694,10 +729,12 @@ class Planner:
         """What "This hour" should say when there is no LLM to write one.
 
         A standing mood the listener set with !mood is only ever partly
-        honoured here -- select_candidates() still filters by the TIME-OF-DAY
-        profile's own energy/genres, and the only thing free text can do
-        without an LLM to interpret it is surface any library artist named
-        in it (see artists_named_in/focus_artists). Saying just the slot's
+        honoured here -- the genre lock lifts for an override (see
+        plan_block), so the pool is no longer walled off to the wrong genre,
+        but the fallback planner still has no way to understand free text: it
+        can only weight towards a library artist named in it (see
+        artists_named_in/focus_artists) and otherwise picks close to at
+        random from whatever the pool now contains. Saying just the slot's
         own mood text while a standing override is active looked like the
         request had been silently dropped; this says plainly that it hasn't
         fully taken effect rather than leaving that to be inferred.
@@ -929,6 +966,21 @@ def _template_weather(reading: dict | None, outlook: bool = False) -> str:
         if chance is not None and chance >= 40:
             line += f" About {_spoken_number(chance)} percent chance of rain."
     return line
+
+
+def _template_news(headlines: list[dict]) -> str:
+    """A spoken news line built straight from one real headline.
+
+    No rewriting: the fallback planner has no LLM to safely paraphrase
+    with, so it reads the headline as fetched rather than risk putting
+    words in a story's mouth.
+    """
+    if not headlines:
+        return ""
+    headline = random.choice(headlines).get("title") or ""
+    if not headline:
+        return ""
+    return f"In the news: {headline}."
 
 
 def _roll(spec, default: int = 0) -> int:

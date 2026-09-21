@@ -100,6 +100,9 @@ dj:
     # Hours [start, end) where the weather moment covers the day ahead rather
     # than only the conditions outside right now.
     weather_outlook_hours: [5, 11]
+    # Chance that an hour includes a news moment, only relevant when
+    # news.enabled below and a feed actually has headlines cached.
+    news_chance: 0.4
 
 tts:
   # piper_cli      -> the `piper` executable on PATH (recommended)
@@ -161,6 +164,22 @@ weather:
   longitude: 5.4697
   timezone: "Europe/Amsterdam"
   # The station plans an hour ahead anyway, so a reading this old is fine.
+  cache_minutes: 30
+  timeout_seconds: 10
+
+news:
+  # RSS: free, no API key, no account, no bill -- same reasoning as weather.
+  # Off by default so a fresh install stays exactly as quiet as before.
+  enabled: false
+  # Any well-formed RSS 2.0 feed (<item><title>...) works. BBC needs no key
+  # and no account. Swap in whatever you actually want to hear about --
+  # these two happen to be political and science, which is what this was
+  # built for, but nothing here is specific to either.
+  feeds:
+    - "http://feeds.bbci.co.uk/news/politics/rss.xml"
+    - "http://feeds.bbci.co.uk/news/science_and_environment/rss.xml"
+  # How many of the newest headlines to pull from EACH feed above.
+  headlines_per_feed: 3
   cache_minutes: 30
   timeout_seconds: 10
 

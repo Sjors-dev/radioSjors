@@ -16,6 +16,7 @@ from .discovery import LastFM
 from .downloader import Downloader
 from .library import Library
 from .liquidsoap import AI_QUEUE, REQUEST_QUEUE, LiquidsoapClient
+from .news import News
 from .publisher import SitePublisher
 from .queueing import QueueManager
 from .tts import TTS
@@ -40,7 +41,9 @@ class App:
         self.llm = LLM(cfg)
         self.tts = TTS(cfg)
         self.weather = Weather(cfg)
-        self.planner = Planner(cfg, self.db, self.library, self.llm, self.weather)
+        self.news = News(cfg)
+        self.planner = Planner(cfg, self.db, self.library, self.llm,
+                               self.weather, self.news)
         self.downloader = Downloader(cfg, self.db, self.library, self.lastfm)
         self.queue = QueueManager(cfg, self.db, self.library, self.tts)
         self.site = SitePublisher(cfg, self.db, self.queue, self.library,
@@ -320,6 +323,21 @@ def cmd_weather(args, cfg: Config) -> int:
     return 0
 
 
+def cmd_news(args, cfg: Config) -> int:
+    news = News(cfg)
+    if not news.enabled:
+        print("news is disabled in config (news.enabled)")
+        return 0
+    headlines = news.headlines(force=True)
+    if not headlines:
+        print("could not reach any configured feed", file=sys.stderr)
+        return 1
+    for item in headlines:
+        print(f"  {item['title']}  ({item['source']})")
+    print(f"\nas the hosts are told it:\n{news.briefing()}")
+    return 0
+
+
 def cmd_site_init(args, cfg: Config) -> int:
     """Create the gist the website reads, once."""
     app = App(cfg)
@@ -575,6 +593,14 @@ def cmd_doctor(args, cfg: Config) -> int:
     else:
         report("WARN", "weather", "disabled in config")
 
+    if app.news.enabled:
+        headlines = app.news.headlines()
+        report("OK" if headlines else "WARN", "news",
+               f"{len(headlines)} headlines ready" if headlines
+               else "no feed reachable - the hosts will skip it")
+    else:
+        report("WARN", "news", "disabled in config")
+
     if app.site.enabled:
         report("OK" if app.site.publish_now() else "FAIL", "website feed",
                f"gist {app.site.gist_id}")
@@ -635,6 +661,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="render a two-host exchange; split turns with |")
 
     sub.add_parser("weather", help="show the weather the hosts are given")
+    sub.add_parser("news", help="show the headlines the hosts are given")
 
     site_init = sub.add_parser("site-init",
                                help="create the gist the website reads")
@@ -674,6 +701,7 @@ COMMANDS = {
     "download": cmd_download,
     "tts-test": cmd_tts_test,
     "weather": cmd_weather,
+    "news": cmd_news,
     "site-init": cmd_site_init,
     "site-preview": cmd_site_preview,
     "mood": cmd_mood,

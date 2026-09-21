@@ -28,6 +28,7 @@ from airadio.discovery import LastFM
 from airadio.downloader import Downloader, DownloadResult
 from airadio.library import Library
 from airadio.liquidsoap import annotate_uri, format_metadata, parse_metadata
+from airadio.news import News
 from airadio.publisher import SitePublisher
 from airadio.queueing import QueueManager, wav_duration
 from airadio.tts import TTS
@@ -37,7 +38,7 @@ from airadio.brain.intent import _rules
 from airadio.brain.llm import LLM, extract_json
 from airadio.brain.planner import (Planner, _clean_exchange,
                                    _drop_consecutive_talk, _spoken_number,
-                                   _template_weather)
+                                   _template_news, _template_weather)
 
 BASE_CONFIG = yaml.safe_load((Path(__file__).resolve().parent.parent
                               / "config" / "config.yaml").read_text(encoding="utf-8"))
@@ -1383,6 +1384,21 @@ class TestFallbackPlanner(RadioTestCase):
         ids = [i["track"]["id"] for i in plan["items"] if i["kind"] == "song"]
         self.assertEqual(len(ids), len(set(ids)))
 
+    def test_fallback_can_read_a_real_headline(self):
+        self.seed_library(artists=8, per_artist=4)
+        self.cfg._data["dj"] = dict(self.cfg._data["dj"])
+        self.cfg._data["dj"]["segments"] = dict(
+            self.cfg._data["dj"]["segments"], news_chance=1.0,
+            banter_per_block=[0, 0], weather_chance=0.0)
+        planner = Planner(self.cfg, self.db, self.library, LLM(self.cfg),
+                          news=FakeNews(list(SAMPLE_HEADLINES)))
+        plan = planner.plan_block(datetime(2026, 1, 1, 14, 0))
+        patter_texts = " ".join(i["text"] for i in plan["items"]
+                                if i["kind"] == "patter")
+        self.assertIn("In the news:", patter_texts)
+        self.assertTrue(any(item["title"] in patter_texts
+                            for item in SAMPLE_HEADLINES))
+
     def test_show_note_names_the_actual_schedule_not_just_that_llm_is_down(self):
         # The site showed "fallback programming (no LLM)" with no hint of
         # what the fallback actually picked -- the mood text answers that.
@@ -1884,6 +1900,115 @@ class TestWeather(unittest.TestCase):
         self.assertEqual(_template_weather({"place": "x"}), "")
 
 
+class FakeNews:
+    """Stands in for an RSS fetch. No test is allowed to touch the network."""
+
+    def __init__(self, headlines: list[dict] | None = None):
+        self.enabled = headlines is not None
+        self._headlines = headlines or []
+
+    def headlines(self, force: bool = False) -> list[dict]:
+        return self._headlines
+
+    def briefing(self) -> str:
+        if not self._headlines:
+            return ""
+        return "\n".join(f"- {item['title']}" for item in self._headlines)
+
+
+SAMPLE_HEADLINES = [
+    {"title": "Parliament debates new energy bill", "source": "feed-a"},
+    {"title": "Scientists find ancient river channels on Mars", "source": "feed-b"},
+]
+
+
+class TestNews(unittest.TestCase):
+    def test_disabled_news_reports_nothing(self):
+        cfg = Config({"news": {"enabled": False}}, Path("."))
+        self.assertEqual(News(cfg).headlines(), [])
+        self.assertEqual(News(cfg).briefing(), "")
+
+    def test_briefing_lists_bare_headlines_with_no_instruction_text(self):
+        # The "facts only, use nothing else" framing belongs in the prompt
+        # template, not baked into the module -- same split as weather.
+        cfg = Config({"news": {"enabled": True}}, Path("."))
+        news = News(cfg)
+        news._cache = list(SAMPLE_HEADLINES)
+        news._cached_at = time.time()
+        brief = news.briefing()
+        self.assertIn("Parliament debates new energy bill", brief)
+        self.assertIn("Scientists find ancient river channels on Mars", brief)
+        self.assertNotIn("facts only", brief)
+
+    def test_a_failed_fetch_keeps_serving_the_last_headlines(self):
+        cfg = Config({"news": {"enabled": True}}, Path("."))
+        news = News(cfg)
+        news._cache = list(SAMPLE_HEADLINES)
+        news._cached_at = 0.0          # stale, so a refresh is due
+        news._fetch_all = lambda: []   # and the refresh comes back empty
+        self.assertEqual(news.headlines(), SAMPLE_HEADLINES)
+        self.assertGreater(news._quiet_until, time.time())
+
+    def test_default_feeds_are_used_when_none_are_configured(self):
+        cfg = Config({"news": {"enabled": True}}, Path("."))
+        news = News(cfg)
+        self.assertTrue(news.feeds)
+        self.assertTrue(all(url.startswith("http") for url in news.feeds))
+
+    def test_configured_feeds_override_the_default(self):
+        cfg = Config({"news": {"enabled": True,
+                              "feeds": ["http://example.test/rss"]}}, Path("."))
+        self.assertEqual(News(cfg).feeds, ["http://example.test/rss"])
+
+    def test_parses_real_rss_and_respects_the_per_feed_cap(self):
+        rss = """<?xml version="1.0"?>
+        <rss version="2.0"><channel>
+          <title>Example Feed</title>
+          <item><title>First story - BBC News</title></item>
+          <item><title>Second story</title></item>
+          <item><title>Third story</title></item>
+          <item><title>Fourth story (should not be reached)</title></item>
+        </channel></rss>"""
+
+        class FakeResp:
+            content = rss.encode("utf-8")
+
+            def raise_for_status(self):
+                pass
+
+        cfg = Config({"news": {"enabled": True, "headlines_per_feed": 3,
+                              "feeds": ["http://example.test/rss"]}}, Path("."))
+        news = News(cfg)
+        news._session.get = lambda *a, **k: FakeResp()
+        headlines = news.headlines(force=True)
+        titles = [item["title"] for item in headlines]
+        self.assertEqual(titles, ["First story", "Second story", "Third story"])
+
+    def test_unreachable_feed_is_skipped_not_fatal(self):
+        cfg = Config({"news": {"enabled": True,
+                              "feeds": ["http://example.test/rss"]}}, Path("."))
+        news = News(cfg)
+
+        def boom(*a, **k):
+            raise ConnectionError("no route to host")
+
+        news._session.get = boom
+        self.assertEqual(news.headlines(force=True), [])
+
+    def test_outlet_suffix_is_stripped_from_a_title(self):
+        from airadio.news import _clean
+        self.assertEqual(_clean("Some story - BBC News"), "Some story")
+        self.assertEqual(_clean("Plain headline"), "Plain headline")
+
+    def test_template_news_reads_a_real_headline(self):
+        line = _template_news(SAMPLE_HEADLINES)
+        self.assertTrue(line.startswith("In the news:"))
+        self.assertTrue(any(item["title"] in line for item in SAMPLE_HEADLINES))
+
+    def test_template_news_survives_no_headlines(self):
+        self.assertEqual(_template_news([]), "")
+
+
 # -- two hosts --------------------------------------------------------------
 
 
@@ -1891,7 +2016,8 @@ class TestHostsAndSegments(RadioTestCase):
     def setUp(self):
         super().setUp()
         self.planner = Planner(self.cfg, self.db, self.library, LLM(self.cfg),
-                               FakeWeather(dict(SAMPLE_READING)))
+                               FakeWeather(dict(SAMPLE_READING)),
+                               FakeNews(list(SAMPLE_HEADLINES)))
 
     def _segments(self, **overrides):
         """Rewrite dj.segments in place for a deterministic roll."""
@@ -1899,7 +2025,7 @@ class TestHostsAndSegments(RadioTestCase):
         self.cfg._data["dj"]["segments"] = {
             "banter_per_block": [0, 0], "banter_turns": [4, 4],
             "music_notes_per_block": [0, 0], "weather_chance": 0.0,
-            "weather_outlook_hours": [5, 11], **overrides}
+            "weather_outlook_hours": [5, 11], "news_chance": 0.0, **overrides}
 
     def test_hosts_come_from_config(self):
         self.assertEqual(self.planner.host_names(), ["Ray", "Nina"])
@@ -1917,7 +2043,7 @@ class TestHostsAndSegments(RadioTestCase):
         brief = self.planner.segment_brief(datetime(2026, 1, 1, 14, 0),
                                            ["Ray", "Nina"], True)
         self.assertEqual(brief, {"banter": 0, "banter_turns": 4,
-                                 "music_notes": 0, "weather": ""})
+                                 "music_notes": 0, "weather": "", "news": False})
         self.assertIn("quiet one",
                       self.planner._segment_plan_text(brief, ["Ray", "Nina"]))
 
@@ -1946,6 +2072,23 @@ class TestHostsAndSegments(RadioTestCase):
         self.assertEqual(self.planner._weather_text({"weather": ""}), "")
         self.assertIn("high of", self.planner._weather_text({"weather": "outlook"}))
         self.assertNotIn("high of", self.planner._weather_text({"weather": "now"}))
+
+    def test_news_slot_is_rolled_like_weather(self):
+        self._segments(news_chance=1.0)
+        brief = self.planner.segment_brief(datetime(2026, 1, 1, 14, 0),
+                                           ["Ray", "Nina"], True, has_news=True)
+        self.assertTrue(brief["news"])
+
+    def test_no_news_slot_when_there_are_no_headlines(self):
+        self._segments(news_chance=1.0)
+        brief = self.planner.segment_brief(datetime(2026, 1, 1, 14, 0),
+                                           ["Ray", "Nina"], True, has_news=False)
+        self.assertFalse(brief["news"])
+
+    def test_news_text_is_only_offered_when_a_slot_asked_for_it(self):
+        self.assertEqual(self.planner._news_text({"news": False}), "")
+        text = self.planner._news_text({"news": True})
+        self.assertIn("Parliament debates new energy bill", text)
 
 
 class TestGenreFiltering(RadioTestCase):

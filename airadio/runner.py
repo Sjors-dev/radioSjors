@@ -22,6 +22,7 @@ from .discovery import LastFM
 from .downloader import Downloader
 from .library import Library
 from .liquidsoap import AI_QUEUE, REQUEST_QUEUE, LiquidsoapClient, annotate_uri
+from .news import News
 from .publisher import SitePublisher
 from .queueing import QueueManager
 from .tts import TTS
@@ -45,7 +46,9 @@ class Runner:
         self.llm = LLM(cfg)
         self.tts = TTS(cfg)
         self.weather = Weather(cfg)
-        self.planner = Planner(cfg, self.db, self.library, self.llm, self.weather)
+        self.news = News(cfg)
+        self.planner = Planner(cfg, self.db, self.library, self.llm,
+                               self.weather, self.news)
         self.downloader = Downloader(cfg, self.db, self.library, self.lastfm)
         self.queue = QueueManager(cfg, self.db, self.library, self.tts)
         self.site = SitePublisher(cfg, self.db, self.queue, self.library,
@@ -89,6 +92,13 @@ class Runner:
             log.info("hosts: %s", self.tts.check_exchange()[1])
         log.info("weather: %s", "disabled" if not self.weather.enabled
                  else (self.weather.briefing() or "unavailable right now"))
+        if self.news.enabled:
+            headlines = self.news.headlines()
+            log.info("news: %s", f"{len(headlines)} headlines from "
+                     f"{len(self.news.feeds)} feed(s)" if headlines
+                     else "unavailable right now")
+        else:
+            log.info("news: disabled")
         log.info("site: %s", "publishing to gist " + self.site.gist_id
                  if self.site.enabled else f"not publishing ({self.site.why_disabled()})")
         log.info("llm providers available: %s",

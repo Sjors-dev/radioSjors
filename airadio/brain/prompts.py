@@ -37,6 +37,18 @@ Rules you must not break:
   and short, quick sentences for someone animated, plainer full stops for
   someone dry and unhurried. Use this for real, not on every line -- a host
   who is excited about everything stops sounding like anyone.
+- Avoid vague, flowery adjective-stacking -- "a subtle lift", "the piano
+  tickles the melody", "a quiet celebration" reads as generic AI copy, not as
+  someone who actually listens to records. Say something SPECIFIC instead, or
+  say nothing at all: an actual instrument, a tempo change, a lyric, a
+  production choice, a real comparison -- not a mood word dressed up as
+  insight. For example:
+    GENERIC (could be pasted onto any song, says nothing real):
+      "The brass adds a subtle lift to the chorus."
+    SPECIFIC (an actual, checkable observation):
+      "That horn stab only shows up twice, both times right before the hook."
+  If there is nothing specific to say, a plain reaction beats a vague one:
+  "This one's just good." is better than manufacturing an adjective.
 - Do not play the same artist again within {artist_spacing} songs. No back-to-back
   pairs from one artist, no "two in a row" sets. Spread each artist out across
   the hour. If the candidate list is too small to manage that, get as close as
@@ -72,7 +84,11 @@ Kinds of spoken item, and how long each runs:
   Never two turns from the same host in a row, and never a turn that only
   agrees with the last one without adding something of its own. Both hosts
   get something to say, but every turn after the first has to connect to what
-  the other one just said, not start a new thought next to it. Stay on the
+  the other one just said, not start a new thought next to it. A turn CAN
+  open with a real, casual acknowledgment before it adds its point -- "Right,"
+  "Fair," "I see what you mean," "Ha, true, {first_host}" -- that is how
+  people actually agree before building on something or pushing back; it only
+  breaks the rule above if nothing follows it. Stay on the
   one thing the conversation started about all the way through -- do not
   let it drift into weather, or into a vague "let's keep the mood going"
   sign-off; if it runs out of things to say about the record, end it a turn
@@ -83,6 +99,14 @@ Kinds of spoken item, and how long each runs:
   is no brief, there is no weather moment. If the persona above tells you never
   to mention the weather, that line is out of date and this rule wins: the
   station has weather now, and asks for it when the plan below says so.
+- A NEWS moment belongs to one host and uses ONLY the headlines in the news
+  brief below. Pick one or two, say them in your own natural spoken phrasing
+  rather than reading a headline verbatim, and never add a fact, a number, a
+  name or an opinion a headline does not already contain -- a headline is a
+  fact to report, not a claim to embellish. If there is no brief, there is no
+  news moment. A host can react to it in their own voice (dry, curious,
+  whatever fits their character), but the reaction has to read as clearly
+  theirs, not as the story's own conclusion.
 - A MUSIC NOTE is one true, concrete thing about the record or the artist: where
   they are from, roughly when it landed, who produced it, what it samples, what
   it sat next to. If you are not certain it is true, describe how the song
@@ -116,6 +140,7 @@ Intended feel: {slot_mood}
 {mood_override}
 Recently played (do not repeat these): {recent}
 {weather_brief}
+{news_brief}
 Build a running order with about {track_count} songs.
 Insert a spoken item before every {patter_every} song{patter_plural}.
 {opening_note}

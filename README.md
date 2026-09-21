@@ -18,6 +18,7 @@ Single listener. Not a public broadcast.
                   │   BRAIN     │────▶ discover real similar tracks
   Discord bot ───▶│  (Python)   │     yt-dlp ─▶ download + tag what's missing
                   │   planner   │◀──── Open-Meteo: what it's doing outside
+                  │             │◀──── RSS: real headlines, off by default
                   │             │────▶ writes everything the hosts say
                   └──────┬──────┘────▶ gist ─▶ Vercel site ─▶ your phone
                          │ block: [talk, song, talk, song, …]
@@ -70,6 +71,7 @@ Kill the brain and the music keeps playing. That is the point, and
 | `airadio/downloader.py` | yt-dlp wrapper and the quality filters that make it usable |
 | `airadio/tts.py` | Piper (or espeak, or edge-tts with Piper as its fallback) renderer, a voice per host, stitches a two-host exchange into one file |
 | `airadio/weather.py` | Open-Meteo. Free, keyless, and never fatal — no reading means the hosts skip it |
+| `airadio/news.py` | RSS headlines (BBC by default). Free, keyless, and never fatal — off by default, and no headlines means the hosts skip it |
 | `airadio/publisher.py` | Pushes now-playing and the queue to a secret gist, which the website reads |
 | `airadio/brain/llm.py` | Gemini ⇄ Groq with failover and rate-limit cooldown |
 | `airadio/brain/planner.py` | The hourly block: one LLM pass picks the order and writes every patter line. Deterministic fallback when the LLM is down |
@@ -104,6 +106,13 @@ Weather comes from Open-Meteo: free, no key, no account. An hour with no
 weather slot is not shown the briefing at all, because a model will use
 anything you give it.
 
+News works the same way, from RSS (BBC's political and science feeds by
+default, swap in whatever you actually want in `news.feeds`) — off by
+default in `news.enabled`, and an hour with no news slot is not shown any
+headlines at all, same reasoning as weather. The DJ never invents a fact
+beyond what a headline actually says; it paraphrases a real one in its own
+words instead of reading it verbatim.
+
 Piper is a small offline voice, so it has a real ceiling on expressiveness —
 but `dj.hosts[].noise_scale`/`noise_w` (Piper's own VITS knobs, one host can
 sound more animated than another) and how much punctuation the writing itself
@@ -133,6 +142,7 @@ one line falls straight back to Piper rather than skipping the line, and
 .venv/bin/python main.py tts-test --host Nina "let me try"
 .venv/bin/python main.py tts-test --duet "Ray says this|and Nina answers"
 .venv/bin/python main.py weather          # what the hosts are told about outside
+.venv/bin/python main.py news             # the headlines the hosts are told about
 .venv/bin/python main.py site-init        # create the gist the website reads
 .venv/bin/python main.py site-preview     # exactly what the website would be told
 .venv/bin/python main.py mood "darker and slower"
@@ -193,8 +203,8 @@ just come out weaker than you'd like and be worth a second attempt.
 
 ## Running costs
 
-Nothing. Last.fm, Gemini, Groq, Discord, Open-Meteo, GitHub Gists, Vercel and
-yt-dlp are all free tiers with no card, and the hourly-batched design makes
+Nothing. Last.fm, Gemini, Groq, Discord, Open-Meteo, RSS, GitHub Gists, Vercel
+and yt-dlp are all free with no card, and the hourly-batched design makes
 only a handful of LLM calls per hour. TTS is local. The only bill is
 caster.fm, if you choose a paid tier there.
 
@@ -204,9 +214,10 @@ caster.fm, if you choose a paid tier there.
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-240 offline tests — no network, no liquidsoap needed, and only a handful want
+257 offline tests — no network, no liquidsoap needed, and only a handful want
 ffmpeg (skipped automatically if it's missing). They cover the quality
 filters, de-duplication, banning, the fallback planner, artist spacing, queue
-claiming, LLM failover, the liquidsoap telnet protocol, the weather briefing,
-two-host conversation validation and rendering, the schema migration, the
-edge-tts/piper fallback, loudness normalisation, and what the website gets told.
+claiming, LLM failover, the liquidsoap telnet protocol, the weather and news
+briefings, two-host conversation validation and rendering, the schema
+migration, the edge-tts/piper fallback, loudness normalisation, and what the
+website gets told.
